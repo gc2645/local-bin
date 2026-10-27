@@ -98,9 +98,9 @@ def fetch_host(host):
             if ps_out:
                 gpu_cmdlines = []
                 for line in ps_out.splitlines()[1:]:  # skip header
-                    parts = line.split(None, 10)
-                    if len(parts) >= 11:
-                        gpu_cmdlines.append({"pid": parts[1], "user": parts[0], "cmdline": parts[10]})
+                    parts = line.split(None, 8)
+                    if len(parts) >= 9:
+                        gpu_cmdlines.append({"pid": parts[1], "user": parts[0], "cmdline": parts[8]})
                     elif len(parts) >= 2:
                         gpu_cmdlines.append({"pid": parts[1], "user": parts[0], "cmdline": parts[-1]})
                 snap["gpu_cmdlines"] = gpu_cmdlines
@@ -293,6 +293,25 @@ def _parse_cmdline_for_mining(cmdlines):
     for entry in cmdlines:
         args = entry.get("cmdline", "")
         parts = args.split()
+        if not parts:
+            continue
+        # Skip known non-mining process names (check both bin name and full cmdline)
+        bin_name = parts[0].split("/")[-1]
+        full_lower = args.lower()
+        if "celery" in full_lower or "daphne" in full_lower or "gunicorn" in full_lower or "uvicorn" in full_lower:
+            # Task queue / web server processes — not miners
+            continue
+        if bin_name in ("supervisord", "systemd", "bash", "sh", "python",
+                        "python3", "node", "ruby", "java"):
+            # Only check for explicit miner binaries, skip --pool/--algorithm
+            if "/forgeminer" in args:
+                coins.add("Multi")
+            elif "/xmrig" in args:
+                coins.add("XMR")
+            elif "/ethminer" in args or "/miner" in args:
+                if not coins:
+                    coins.add("ETH/ETC")
+            continue
         for i, p in enumerate(parts):
             if p == "--algorithm" and i + 1 < len(parts):
                 coins.add(parts[i + 1].upper())
@@ -520,6 +539,8 @@ def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdli
         return "Image Generation"
     if "mining" in img or "miner" in img:
         return "Mining"
+    if "otaiku" in img:
+        return "GPU Compute  otaiku"
 
     # Cmdline-based mining
     coin_str, pool_str = _parse_cmdline_for_mining(cmdlines)
@@ -612,9 +633,13 @@ def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdli
     if proc_names & {"jupyter","notebook","lab"}:
         return "Jupyter Notebook"
 
-    # Image gen
+    # Image gen (ComfyUI / Stable Diffusion)
+    for entry in ai_cmdlines + cmdlines:
+        args = entry.get("cmdline", "")
+        if "ComfyUI" in args or ("main.py" in args and "8188" in args):
+            return "Image Generation  ComfyUI"
     if proc_names & {"stable_diffusion","diffusers","comfyui",
-                     "automatic1111","sd_webui"}:
+                      "automatic1111","sd_webui"}:
         return "Image Generation"
 
     # Database
