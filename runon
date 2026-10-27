@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+
+# Run one command on a selected group of hosts from nodes.csv.
+
+readonly -a FILTERS=(all node pve vm lxc linux windows gpu)
+readonly HISTORY_FILE="${HOME}/.runon_history"
+readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+readonly NODES_FILE="${SCRIPT_DIR}/../etc/nodes.csv"
+
+usage() {
+    printf 'Usage: %s <filter> <command_to_execute>\n' "${0##*/}" >&2
+    printf 'Valid filters: %s\n' "${FILTERS[*]}" >&2
+}
+
+if (( $# != 2 )); then
+    printf 'Error: exactly two arguments are required.\n' >&2
+    usage
+    exit 2
+fi
+
+readonly FILTER="${1,,}"
+readonly COMMAND="$2"
+
+case "$FILTER" in
+    all|node|pve|vm|lxc|linux|windows|gpu) ;;
+    *)
+        printf 'Error: unknown filter: %s\n' "$FILTER" >&2
+        usage
+        exit 2
+        ;;
+esac
+
+if [[ -z "$COMMAND" ]]; then
+    printf 'Error: command must not be empty.\n' >&2
+    exit 2
+fi
+
+if [[ ! -r "$NODES_FILE" ]]; then
+    printf 'Error: nodes.csv not found or not readable at %s\n' "$NODES_FILE" >&2
+    exit 1
+fi
+
+if ! command -v ssh >/dev/null 2>&1; then
+    printf 'Error: ssh is not installed or not in PATH.\n' >&2
+    exit 127
+fi
+
+NODES=()
+while IFS=, read -r NAME TYPE PLATFORM ID OS GPU; do
+    [[ "${NAME,,}" == "name" || -z "$NAME" ]] && continue
+
+    case "$FILTER" in
+        all)     MATCH=true ;;
+        node)    [[ "$NAME" == node* ]] && MATCH=true || MATCH=false ;;
+        pve)     [[ "${TYPE,,}" == pve ]] && MATCH=true || MATCH=false ;;
+        vm)      [[ "${TYPE,,}" == vm ]] && MATCH=true || MATCH=false ;;
+        lxc)     [[ "${TYPE,,}" == lxc ]] && MATCH=true || MATCH=false ;;
+        linux)   [[ "${OS,,}" == linux ]] && MATCH=true || MATCH=false ;;
+        windows) [[ "${OS,,}" == windows ]] && MATCH=true || MATCH=false ;;
+        gpu)     [[ "${GPU,,}" == gpu ]] && MATCH=true || MATCH=false ;;
+    esac
+
+    [[ "$MATCH" == true ]] && NODES+=("$NAME")
+done < "$NODES_FILE"
+
+if (( ${#NODES[@]} == 0 )); then
+    printf 'No hosts are currently assigned to filter: %s\n' "$FILTER" >&2
+    exit 3
+fi
+
+printf 'Filter: %s\nCommand: %s\nHosts: %s\n\n' "$FILTER" "$COMMAND" "${NODES[*]}"
+printf '%(%Y-%m-%d %H:%M:%S)T - filter=%q command=%q\n' -1 "$FILTER" "$COMMAND" >> "$HISTORY_FILE" || {
+    printf 'Warning: could not append to history file %s\n' "$HISTORY_FILE" >&2
+}
+
+declare -a FAILED=()
+
+for NODE in "${NODES[@]}"; do
+    printf '=== %s: %s ===\n' "$NODE" "$COMMAND"
+    if ssh -qt \
+        -o BatchMode=yes \
+        -o ConnectTimeout=10 \
+        -- "$NODE" "$COMMAND"; then
+        :
+    else
+        rc=$?
+        FAILED+=("$NODE:$rc")
+    fi
+    printf '\n'
+done
+
+if (( ${#FAILED[@]} > 0 )); then
+    printf 'Completed with failures: %s\n' "${FAILED[*]}" >&2
+    exit 1
+fi
+
+printf 'Completed successfully on %d host(s).\n' "${#NODES[@]}"

@@ -1,0 +1,71 @@
+#!/bin/bash
+set -euo pipefail
+
+DRY_RUN=false
+DEST_DIR="./checkpoints"
+
+usage() {
+    echo "Usage: $(basename "$0") [-n|--dry-run] [--dest DIR] <file1> [file2 ...]"
+    exit 1
+}
+
+# Option parsing
+while [[ "${1:-}" == -* ]]; do
+    case "$1" in
+        -n|--dry-run)
+            DRY_RUN=true
+            shift
+            ;;
+        --dest)
+            shift
+            [ "${1:-}" ] || usage
+            DEST_DIR="$1"
+            shift
+            ;;
+        -h|--help)
+            usage
+            ;;
+        *)
+            echo "Unknown option: $1"
+            usage
+            ;;
+    esac
+done
+
+[ "$#" -ge 1 ] || usage
+
+run() {
+    if $DRY_RUN; then
+        echo "[DRY-RUN] $*"
+    else
+        "$@"
+    fi
+}
+
+run mkdir -p "$DEST_DIR"
+
+for file in "$@"; do
+    if [ ! -f "$file" ]; then
+        echo "Skipping (not a regular file): $file"
+        continue
+    fi
+
+    filename=$(basename "$file")
+
+    mtime_epoch=$(stat -c %Y "$file")
+    timestamp=$(date -d "@$mtime_epoch" +%Y%m%d-%H%M%S)
+
+    base="$DEST_DIR/${filename}.${timestamp}"
+    dest="$base"
+    n=1
+
+    while [ -e "$dest" ]; do
+        dest="${base}.${n}"
+        ((n++))
+    done
+
+    run cp -av "$file" "$dest"
+done
+
+# Version: Tue Jan 20 2026 (explicit --dest, glob-safe)
+

@@ -1,0 +1,38 @@
+#!/bin/bash
+
+# Snapshot what a renter/workload is running on a GPU host.
+# Usage: vast-workload <node>
+# Prints docker containers + nvidia-smi summary in one shot for logging into
+# ~/Nextcloud/OpenCode/vastai/WORKLOADS.md
+
+if [ $# -ne 1 ]; then
+    echo "Usage: $0 <node>" >&2
+    echo "Example: $0 node14" >&2
+    exit 1
+fi
+
+NODE="$1"
+TIMEOUT=15
+
+if ! ssh -o ConnectTimeout=$TIMEOUT -o BatchMode=yes "$NODE" true 2>/dev/null; then
+    echo "$NODE: unreachable or no SSH key" >&2
+    exit 1
+fi
+
+echo "=== $NODE — $(date '+%Y-%m-%d %H:%M %Z') ==="
+echo
+echo "--- containers ---"
+ssh "$NODE" 'docker ps --format "table {{.ID}}\t{{.Image}}\t{{.Status}}\t{{.Ports}}\t{{.Names}}"' 2>&1
+
+echo
+echo "--- nvidia-smi ---"
+ssh "$NODE" 'nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu,power.draw,power.limit --format=csv,noheader' 2>&1
+
+echo
+echo "--- GPU processes ---"
+ssh "$NODE" 'nvidia-smi --query-compute-apps=pid,used_memory,process_name --format=csv,noheader' 2>&1
+
+echo
+echo "--- container command (first) ---"
+ssh "$NODE" 'docker ps --format "{{.Names}}" | head -3 | while read c; do [ -n "$c" ] && echo "== $c" && docker inspect "$c" --format "cmd: {{.Config.Cmd}}
+entrypoint: {{.Config.Entrypoint}}" 2>/dev/null; done' 2>&1

@@ -1,0 +1,23 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+NODES_FILE="$SCRIPT_DIR/../etc/nodes.conf"
+
+if [[ ! -f "$NODES_FILE" ]]; then
+    echo "nodes.conf not found at $NODES_FILE" >&2
+    exit 1
+fi
+
+servers=()
+while IFS= read -r line; do
+    servers+=("$line")
+done < <(grep -v '^\s*#' "$NODES_FILE" | grep -v '^\s*$')
+
+for server in "${servers[@]}"; do
+    if ping -W 1 -c 1 "$server" &>/dev/null; then
+        echo "Host $server is alive"
+    else
+        echo "Host $server is unreachable"
+    fi
+done
+echo "------------------------"

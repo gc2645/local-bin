@@ -1,0 +1,981 @@
+#!/usr/bin/env python3
+#
+# =====================================================================
+# llamactl - llama manager for llama.cpp models running and local GGUF listing
+#
+# Commands:
+#   llamactl serve MODEL [extra llama-server args...]
+#   llamactl run MODEL [extra llama-cli args...]
+#   llamactl list [min_gb]
+#   llamactl files [min_gb]
+#   llamactl status
+#   llamactl attach
+#   llamactl stop
+#   llamactl logs
+#
+# Examples:
+#   llamactl serve unsloth/gpt-oss-120b-GGUF:Q4_K_M
+#   llamactl run unsloth/gpt-oss-120b-GGUF:Q4_K_M
+#   llamactl run unsloth/GLM-4.7-Flash-GGUF:UD-Q4_K_XL --temp 1.0 --top-p 0.95
+# =====================================================================
+
+import os
+import re
+import sys
+import shlex
+import struct
+import shutil
+import argparse
+import subprocess
+from datetime import datetime
+
+
+# =====================================================================
+# RUN / SERVE CONFIG - mess with this part most often
+# =====================================================================
+
+LLAMA_SERVER = os.environ.get("LLAMA_SERVER", "llama-server")
+LLAMA_CLI = os.environ.get("LLAMA_CLI", "llama-cli")
+TMUX = os.environ.get("TMUX_BIN", "tmux")
+SESSION = os.environ.get("LLAMA_SESSION", "llama")
+
+DEFAULT_SERVER_ARGS = [
+    "-c", "131072",
+    "--flash-attn", "on",
+    "--jinja",
+    "--parallel", "1",
+    "--no-warmup",
+    "--host", "0.0.0.0",
+    "--port", "8081",
+]
+
+DEFAULT_CLI_ARGS = [
+    "-c", "131072",
+    "--flash-attn", "on",
+    "--jinja",
+    "-cnv",
+]
+
+# Per-model defaults.
+# Match is substring based, so keep keys specific enough.
+MODEL_PROFILES = {
+    # --- GPT-OSS models ---
+    "gpt-oss-20b": [
+        "--alias", "gpt-oss-20b",
+        "--cache-type-k", "q8_0",
+        "--cache-type-v", "q8_0",
+        "--reasoning-effort", "low",
+    ],
+
+    # --- Gemma4 models ---
+    "gemma-4-26B": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--chat-template-kwargs", '{"enable_thinking":false}',
+        "--temp", "1.0",
+        "--top-p", "0.95",
+        "--top-k", "64",
+    ],
+    "gemma-4-12B": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--chat-template-kwargs", '{"enable_thinking":false}',
+        "--temp", "1.0",
+        "--top-p", "0.95",
+        "--top-k", "64",
+    ],
+
+    # --- Qwen3.8 dense models ---
+    "Qwen3.8-27B": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--chat-template-kwargs", '{"reasoning_effort":"low"}',
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+    "Qwen3.8-27B-UD-Q4_K_M": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--chat-template-kwargs", '{"reasoning_effort":"low"}',
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+    "Qwen3.8-27B-UD-IQ3_XXS": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--chat-template-kwargs", '{"reasoning_effort":"low"}',
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+
+    # --- Qwen3.6 MoE models ---
+    "Qwen3.6-35B-A3B": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+    ],
+    "Qwen3.6-35B-A3B-MTP": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+    ],
+
+    # --- Qwen3.6 dense models ---
+    "Qwen3.6-27B": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+    "Qwen3.6-27B-MTP": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+
+    # --- Qwen3.5 models ---
+    "Qwen3.5-9B": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+    ],
+    "Qwen3.5-9B-MTP": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+    "Qwen3.5-122B": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+    ],
+
+    # --- QAT variants (use q4_0 cache, higher temp) ---
+    "grug-27b-qat": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--temp", "1.0",
+        "--top-p", "0.95",
+        "--top-k", "20",
+    ],
+    "grug-35b-qat": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--temp", "1.0",
+        "--top-p", "0.95",
+        "--top-k", "20",
+    ],
+
+    # --- Fine-tuned models ---
+    "Qwopus3.6-27B-Coder": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+    "Qwopus3.6-27B-v2": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+    "ThinkingCap-Qwen3.6-27B": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+    "Tess-4-27B": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+    "Cold-Fusion-GAIN": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+    "Fable-Fusion-711": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--spec-type", "draft-mtp",
+        "--spec-draft-n-max", "2",
+    ],
+
+    # --- Bonsai (ternary) ---
+    "Ternary-Bonsai-27B": [
+        "--cache-type-k", "q8_0",
+        "--cache-type-v", "q8_0",
+        "--reasoning", "off",
+    ],
+    "Bonsai-27B": [
+        "--cache-type-k", "q8_0",
+        "--cache-type-v", "q8_0",
+    ],
+
+    # --- GLM models ---
+    "GLM-4.7-Flash": [
+        "--temp", "1.0",
+        "--top-p", "0.95",
+        "--min-p", "0.01",
+        "--repeat-penalty", "1.0",
+    ],
+
+    # --- Nemotron models ---
+    "Nemotron-3.5-Lightning": [
+        "--cache-type-k", "q4_0",
+        "--cache-type-v", "q4_0",
+        "--cpu-moe",
+    ],
+}
+
+LOG_DIR = os.path.expanduser("~/.cache/llama")
+LOG_FILE = os.path.join(LOG_DIR, "llama-server.log")
+
+
+def profile_args_for(model):
+    args = []
+
+    for needle, extra in MODEL_PROFILES.items():
+        if needle in model:
+            args.extend(extra)
+
+    return args
+
+
+def require_binary(binary):
+    if shutil.which(binary) is None:
+        print(f"ERROR: binary not found: {binary}", file=sys.stderr)
+        sys.exit(1)
+
+
+def require_tmux():
+    require_binary(TMUX)
+
+
+def tmux_has_session(session):
+    result = subprocess.run(
+        [TMUX, "has-session", "-t", session],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def build_server_command(model, extra_args):
+    return [
+        LLAMA_SERVER,
+        "-hf", model,
+        *DEFAULT_SERVER_ARGS,
+        *profile_args_for(model),
+        *extra_args,
+    ]
+
+
+def build_cli_command(model, extra_args):
+    return [
+        LLAMA_CLI,
+        "-hf", model,
+        *DEFAULT_CLI_ARGS,
+        *profile_args_for(model),
+        *extra_args,
+    ]
+
+
+def cmd_serve(args):
+    require_tmux()
+    require_binary(LLAMA_SERVER)
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+    if tmux_has_session(SESSION):
+        if not args.replace:
+            print(f"llama-server tmux session already exists: {SESSION}")
+            print()
+            print("Use one of these:")
+            print("  llamactl attach")
+            print("  llamactl stop")
+            print(f"  llamactl serve --replace {args.model}")
+            return 1
+
+        subprocess.run([TMUX, "kill-session", "-t", SESSION], check=False)
+
+    cmd = build_server_command(args.model, args.extra)
+
+    quoted = " ".join(shlex.quote(x) for x in cmd)
+    shell_cmd = (
+        "set -o pipefail; "
+        f"echo '### {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}'; "
+        f"echo {shlex.quote(quoted)}; "
+        f"exec {quoted} 2>&1 | tee -a {shlex.quote(LOG_FILE)}"
+    )
+
+    subprocess.run(
+        [TMUX, "new-session", "-s", SESSION, "bash", "-lc", shell_cmd],
+        check=True,
+    )
+
+    print(f"Started llama-server in tmux session: {SESSION}")
+    print()
+    print("Command:")
+    print(f"  {quoted}")
+    print()
+    print("Useful:")
+    print("  llamactl attach")
+    print("  llamactl logs")
+    print("  llamactl stop")
+
+    return 0
+
+
+def cmd_run(args):
+    require_binary(LLAMA_CLI)
+
+    cmd = build_cli_command(args.model, args.extra)
+    quoted = " ".join(shlex.quote(x) for x in cmd)
+
+    print("Starting llama-cli:")
+    print(f"  {quoted}")
+    print()
+
+    os.execvp(cmd[0], cmd)
+
+
+def cmd_stop(_args):
+    require_tmux()
+
+    if not tmux_has_session(SESSION):
+        print(f"No tmux session named {SESSION}")
+        return 0
+
+    subprocess.run([TMUX, "kill-session", "-t", SESSION], check=True)
+    print(f"Stopped tmux session: {SESSION}")
+    return 0
+
+
+def cmd_attach(_args):
+    require_tmux()
+
+    if not tmux_has_session(SESSION):
+        print(f"No tmux session named {SESSION}")
+        return 1
+
+    os.execvp(TMUX, [TMUX, "attach", "-t", SESSION])
+
+
+def cmd_status(_args):
+    require_tmux()
+
+    if tmux_has_session(SESSION):
+        print(f"llama-server tmux session is running: {SESSION}")
+        subprocess.run([TMUX, "list-sessions"], check=False)
+        return 0
+
+    print(f"llama-server tmux session is not running: {SESSION}")
+    return 1
+
+
+def cmd_logs(args):
+    if not os.path.exists(LOG_FILE):
+        print(f"No log file found: {LOG_FILE}")
+        return 1
+
+    lines = str(args.lines)
+    os.execvp("tail", ["tail", "-n", lines, "-f", LOG_FILE])
+
+
+# =====================================================================
+# LIST CODE
+# =====================================================================
+
+DEFAULT_MIN_GB = 1.0
+
+DEFAULT_ROOTS = [
+    "~/models",
+]
+
+SKIP_DIRS = {
+    ".git",
+    ".Trash",
+    "node_modules",
+    "Library/Mail",
+    "Library/Photos",
+    "Library/Application Support/MobileSync",
+}
+
+FILE_TYPE_MAP = {
+    0: "F32",
+    1: "F16",
+    2: "Q4_0",
+    3: "Q4_1",
+    6: "Q5_0",
+    7: "Q5_1",
+    8: "Q8_0",
+    9: "Q8_1",
+    10: "Q2_K",
+    11: "Q3_K_S",
+    12: "Q3_K_M",
+    13: "Q3_K_L",
+    14: "Q4_K_S",
+    15: "Q4_K_M",
+    16: "Q5_K_S",
+    17: "Q5_K_M",
+    18: "Q6_K",
+    19: "IQ2_XXS",
+    20: "IQ2_XS",
+    21: "Q2_K_S",
+    22: "IQ3_XS",
+    23: "IQ3_XXS",
+    24: "IQ1_S",
+    25: "IQ4_NL",
+    26: "IQ3_S",
+    27: "IQ3_M",
+    28: "IQ2_S",
+    29: "IQ2_M",
+    30: "IQ4_XS",
+    31: "IQ1_M",
+    32: "BF16",
+    33: "Q4_0_4_4",
+    34: "Q4_0_4_8",
+    35: "Q4_0_8_8",
+    36: "TQ1_0",
+    37: "TQ2_0",
+}
+
+QUANT_RE = re.compile(
+    r"(?:^|[-_.])("
+    r"UD-Q[2-8]_[0-9A-Z_]+|"
+    r"UD-IQ[1-4]_[0-9A-Z_]+|"
+    r"MXFP4|"
+    r"Q[2-8]_[0-9A-Z_]+|"
+    r"IQ[1-4]_[0-9A-Z_]+|"
+    r"BF16|F16|F32|"
+    r"TQ[12]_0"
+    r")(?:[-_.]|$)",
+    re.IGNORECASE,
+)
+
+SHARD_RE = re.compile(
+    r"^(?P<prefix>.+)-(?P<num>\d{5})-of-(?P<total>\d{5})\.gguf$",
+    re.IGNORECASE,
+)
+
+
+def human_size(num):
+    num = float(num)
+
+    for unit in ["B", "KB", "MB", "GB", "TB"]:
+        if num < 1024.0 or unit == "TB":
+            if unit == "B":
+                return f"{num:.0f}B"
+            return f"{num:.1f}{unit}"
+        num /= 1024.0
+
+
+def read_u32(f):
+    return struct.unpack("<I", f.read(4))[0]
+
+
+def read_u64(f):
+    return struct.unpack("<Q", f.read(8))[0]
+
+
+def read_i32(f):
+    return struct.unpack("<i", f.read(4))[0]
+
+
+def read_i64(f):
+    return struct.unpack("<q", f.read(8))[0]
+
+
+def read_f32(f):
+    return struct.unpack("<f", f.read(4))[0]
+
+
+def read_f64(f):
+    return struct.unpack("<d", f.read(8))[0]
+
+
+def read_string(f):
+    n = read_u64(f)
+    data = f.read(n)
+    return data.decode("utf-8", errors="replace")
+
+
+def skip_value(f, t):
+    if t in (0, 1, 7):
+        f.seek(1, os.SEEK_CUR)
+    elif t in (2, 3):
+        f.seek(2, os.SEEK_CUR)
+    elif t in (4, 5, 6):
+        f.seek(4, os.SEEK_CUR)
+    elif t in (10, 11, 12):
+        f.seek(8, os.SEEK_CUR)
+    elif t == 8:
+        n = read_u64(f)
+        f.seek(n, os.SEEK_CUR)
+    elif t == 9:
+        elem_type = read_u32(f)
+        count = read_u64(f)
+
+        for _ in range(count):
+            skip_value(f, elem_type)
+    else:
+        raise ValueError(f"unknown GGUF metadata type {t}")
+
+
+def read_value(f, t):
+    if t == 0:
+        return struct.unpack("<B", f.read(1))[0]
+    if t == 1:
+        return struct.unpack("<b", f.read(1))[0]
+    if t == 2:
+        return struct.unpack("<H", f.read(2))[0]
+    if t == 3:
+        return struct.unpack("<h", f.read(2))[0]
+    if t == 4:
+        return read_u32(f)
+    if t == 5:
+        return read_i32(f)
+    if t == 6:
+        return read_f32(f)
+    if t == 7:
+        return bool(struct.unpack("<?", f.read(1))[0])
+    if t == 8:
+        return read_string(f)
+    if t == 10:
+        return read_u64(f)
+    if t == 11:
+        return read_i64(f)
+    if t == 12:
+        return read_f64(f)
+    if t == 9:
+        elem_type = read_u32(f)
+        count = read_u64(f)
+
+        for _ in range(count):
+            skip_value(f, elem_type)
+
+        return f"array:{count}"
+
+    raise ValueError(f"unknown GGUF metadata type {t}")
+
+
+def parse_gguf(path):
+    meta = {}
+
+    try:
+        with open(path, "rb") as f:
+            if f.read(4) != b"GGUF":
+                return meta
+
+            meta["_gguf_version"] = read_u32(f)
+            meta["_tensor_count"] = read_u64(f)
+            meta["_kv_count"] = read_u64(f)
+
+            for _ in range(meta["_kv_count"]):
+                key = read_string(f)
+                val_type = read_u32(f)
+                meta[key] = read_value(f, val_type)
+
+    except Exception as e:
+        meta["_error"] = str(e)
+
+    return meta
+
+
+def repo_from_path(path):
+    parts = path.split(os.sep)
+
+    for p in parts:
+        if p.startswith("models--"):
+            return p.replace("models--", "").replace("--", "/")
+
+    return ""
+
+
+def compact_path(path):
+    home = os.path.expanduser("~")
+
+    if path.startswith(home):
+        return "~" + path[len(home):]
+
+    return path
+
+
+def first_meta(meta, keys, default="?"):
+    for key in keys:
+        val = meta.get(key)
+
+        if val not in (None, ""):
+            return val
+
+    return default
+
+
+def quant_from_filename(path, meta):
+    name = os.path.basename(path)
+
+    matches = QUANT_RE.findall(name)
+    if matches:
+        return matches[-1].upper()
+
+    ft = meta.get("general.file_type")
+
+    if isinstance(ft, int) and ft in FILE_TYPE_MAP:
+        return FILE_TYPE_MAP[ft]
+
+    return "?"
+
+
+def clean_model_name(path):
+    repo = repo_from_path(path)
+
+    if repo:
+        return repo
+
+    base = os.path.basename(path)
+
+    shard = SHARD_RE.match(base)
+    if shard:
+        base = shard.group("prefix") + ".gguf"
+
+    return re.sub(r"\.gguf$", "", base, flags=re.IGNORECASE)
+
+
+def clean_file_name(path):
+    return os.path.basename(path)
+
+
+def model_with_quant(path, meta):
+    model = clean_model_name(path)
+    quant = quant_from_filename(path, meta)
+
+    if quant == "?":
+        return model
+
+    if model.endswith(f":{quant}"):
+        return model
+
+    return f"{model}:{quant}"
+
+
+def row_quality(row):
+    score = 0
+
+    for key in ["ctx", "layers", "embed"]:
+        if row.get(key) not in (None, "", "?"):
+            score += 1
+
+    if row.get("has_error"):
+        score -= 10
+
+    return score
+
+
+def find_ggufs(roots, min_bytes):
+    seen = set()
+
+    for root in roots:
+        root = os.path.expanduser(root)
+
+        if not os.path.exists(root):
+            continue
+
+        if os.path.isfile(root):
+            candidates = [root]
+        else:
+            candidates = []
+
+            for dirpath, dirnames, filenames in os.walk(root):
+                rel = os.path.relpath(dirpath, os.path.expanduser("~"))
+
+                dirnames[:] = [
+                    d for d in dirnames
+                    if d not in SKIP_DIRS and os.path.join(rel, d) not in SKIP_DIRS
+                ]
+
+                for filename in filenames:
+                    if filename.lower().endswith(".gguf"):
+                        candidates.append(os.path.join(dirpath, filename))
+
+        for path in candidates:
+            try:
+                real = os.path.realpath(path)
+
+                if real in seen:
+                    continue
+
+                seen.add(real)
+
+                st = os.stat(path)
+
+                if st.st_size < min_bytes:
+                    continue
+
+                yield path, st
+
+            except OSError:
+                continue
+
+
+def shorten(s, width):
+    s = str(s)
+
+    if len(s) <= width:
+        return s
+
+    if width <= 1:
+        return "…"
+
+    return s[:width - 1] + "…"
+
+
+def aggregate_model_rows(rows):
+    grouped = {}
+
+    for row in rows:
+        key = row["model"]
+
+        if key not in grouped:
+            grouped[key] = dict(row)
+            grouped[key]["bytes"] = 0
+            grouped[key]["file_count"] = 0
+            grouped[key]["best_row"] = row
+
+        g = grouped[key]
+        g["bytes"] += row["bytes"]
+        g["file_count"] += 1
+
+        if row_quality(row) > row_quality(g["best_row"]):
+            g["best_row"] = row
+
+        if row["mtime"] > g["mtime"]:
+            g["mtime"] = row["mtime"]
+
+    out = []
+
+    for key, g in grouped.items():
+        best = g["best_row"]
+
+        final = dict(best)
+        final["bytes"] = g["bytes"]
+        final["size"] = human_size(g["bytes"])
+        final["mtime"] = g["mtime"]
+        final["modified"] = datetime.fromtimestamp(g["mtime"]).strftime("%Y-%m-%d %H:%M")
+        final["file_count"] = g["file_count"]
+
+        out.append(final)
+
+    out.sort(key=lambda r: r["model"].lower())
+    return out
+
+
+def print_table(rows, show_files=False):
+    if not rows:
+        print("No GGUF LLM files found above the minimum size.")
+        return
+
+    term_width = shutil.get_terminal_size((150, 24)).columns
+    term_width = max(term_width, 90)
+
+    if not show_files:
+        headers = [
+            "MODEL",
+            "SIZE",
+            "CTX",
+            "LAYERS",
+            "EMBED",
+            "MODIFIED",
+        ]
+
+        widths = {
+            "SIZE": 7,
+            "CTX": 7,
+            "LAYERS": 6,
+            "EMBED": 6,
+            "MODIFIED": 16,
+        }
+
+        fixed_width = (
+            2 +
+            widths["SIZE"] + 2 +
+            widths["CTX"] + 2 +
+            widths["LAYERS"] + 2 +
+            widths["EMBED"] + 2 +
+            widths["MODIFIED"]
+        )
+
+        max_model_len = max(len("MODEL"), *(len(r["model"]) for r in rows))
+        model_width = min(max_model_len, max(24, term_width - fixed_width))
+
+        fmt = (
+            f"{{:<{model_width}}}  "
+            f"{{:<{widths['SIZE']}}}  "
+            f"{{:>{widths['CTX']}}}  "
+            f"{{:>{widths['LAYERS']}}}  "
+            f"{{:>{widths['EMBED']}}}  "
+            f"{{:<{widths['MODIFIED']}}}"
+        )
+
+        print()
+        print("Local llama.cpp GGUF models")
+        print("=" * min(term_width, 140))
+        print(fmt.format(*headers))
+        print(fmt.format(
+            "-----",
+            "----",
+            "---",
+            "------",
+            "-----",
+            "--------",
+        ))
+
+        for r in rows:
+            print(fmt.format(
+                shorten(r["model"], model_width),
+                r["size"],
+                r["ctx"],
+                r["layers"],
+                r["embed"],
+                r["modified"],
+            ))
+
+        return
+
+    print()
+    print("Model files")
+    print("-" * min(term_width, 140))
+
+    for r in rows:
+        print(f"{r['size']:>8}  {r['model']}")
+        print(f"          file: {r['file']}")
+        print(f"          path: {compact_path(r['path'])}")
+
+
+def get_file_rows(args):
+    roots = list(DEFAULT_ROOTS)
+
+    if args.root:
+        roots.extend(args.root)
+
+    if args.home:
+        roots.append("~")
+
+    min_bytes = int(args.min_gb * 1024 ** 3)
+    rows = []
+
+    for path, st in find_ggufs(roots, min_bytes):
+        meta = parse_gguf(path)
+
+        if "_error" in meta and not args.all:
+            continue
+
+        arch = str(first_meta(meta, ["general.architecture"], "?"))
+
+        ctx_key = f"{arch}.context_length" if arch != "?" else ""
+        layers_key = f"{arch}.block_count" if arch != "?" else ""
+        embed_key = f"{arch}.embedding_length" if arch != "?" else ""
+
+        ctx = first_meta(meta, [ctx_key, "llama.context_length"], "?")
+        layers = first_meta(meta, [layers_key, "llama.block_count"], "?")
+        embed = first_meta(meta, [embed_key, "llama.embedding_length"], "?")
+
+        rows.append({
+            "size": human_size(st.st_size),
+            "bytes": st.st_size,
+            "ctx": str(ctx),
+            "layers": str(layers),
+            "embed": str(embed),
+            "modified": datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M"),
+            "mtime": st.st_mtime,
+            "model": model_with_quant(path, meta),
+            "file": clean_file_name(path),
+            "path": path,
+            "has_error": "_error" in meta,
+        })
+
+    rows.sort(key=lambda r: (r["model"].lower(), r["file"].lower()))
+    return rows
+
+
+def cmd_list(args):
+    file_rows = get_file_rows(args)
+    rows = aggregate_model_rows(file_rows)
+    print_table(rows, show_files=False)
+    return 0
+
+
+def cmd_files(args):
+    rows = get_file_rows(args)
+    print_table(rows, show_files=True)
+    return 0
+
+
+# =====================================================================
+# CLI
+# =====================================================================
+
+def add_list_args(p):
+    p.add_argument(
+        "min_gb",
+        nargs="?",
+        type=float,
+        default=DEFAULT_MIN_GB,
+        help=f"minimum GGUF file size in GB, default {DEFAULT_MIN_GB}",
+    )
+    p.add_argument("--root", action="append", help="extra root to search; may be used multiple times")
+    p.add_argument("--home", action="store_true", help="scan entire home directory; slower")
+    p.add_argument("--all", action="store_true", help="show files above minimum even if metadata cannot be parsed")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="llama.cpp",
+        description="Manage llama.cpp serving, cli sessions, and local GGUF files.",
+    )
+
+    sub = parser.add_subparsers(dest="command")
+
+    p_serve = sub.add_parser("serve", help="start llama-server in tmux")
+    p_serve.add_argument("--replace", action="store_true", help="kill existing llama tmux session first")
+    p_serve.add_argument("model", help="HF model repo, optionally with :quant/tag")
+    p_serve.add_argument("extra", nargs=argparse.REMAINDER, help="extra llama-server args")
+    p_serve.set_defaults(func=cmd_serve)
+
+    p_run = sub.add_parser("run", help="start llama-cli in the foreground")
+    p_run.add_argument("model", help="HF model repo, optionally with :quant/tag")
+    p_run.add_argument("extra", nargs=argparse.REMAINDER, help="extra llama-cli args")
+    p_run.set_defaults(func=cmd_run)
+
+    p_list = sub.add_parser("list", help="list local GGUF models")
+    add_list_args(p_list)
+    p_list.set_defaults(func=cmd_list)
+
+    p_files = sub.add_parser("files", help="list local GGUF model files and paths")
+    add_list_args(p_files)
+    p_files.set_defaults(func=cmd_files)
+
+    p_status = sub.add_parser("status", help="show llama-server tmux session status")
+    p_status.set_defaults(func=cmd_status)
+
+    p_attach = sub.add_parser("attach", help="attach to llama-server tmux session")
+    p_attach.set_defaults(func=cmd_attach)
+
+    p_stop = sub.add_parser("stop", help="stop llama-server tmux session")
+    p_stop.set_defaults(func=cmd_stop)
+
+    p_logs = sub.add_parser("logs", help="tail llama-server log")
+    p_logs.add_argument("-n", "--lines", type=int, default=80, help="lines to show before following")
+    p_logs.set_defaults(func=cmd_logs)
+
+    args = parser.parse_args()
+
+    if not args.command:
+        parser.print_help()
+        return 1
+
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

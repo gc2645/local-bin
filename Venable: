@@ -1,0 +1,252 @@
+#!/usr/bin/env bash
+#
+#AI Agent that responds like Bryan Venable
+#
+
+set -euo pipefail
+
+MODEL=""
+DEBUG=0
+THINK_OVERRIDE=""
+HIDE_THINKING=""
+VERBOSE=""
+
+VENABLE_PHRASES=(
+    "   You didn't know that?..."
+    "   Do you guys smell bacon?..."
+    "   My wife is in Mensa..."
+    "   I thought everybody knew that...."
+    "   Yeah, it was in the manual..."
+    "   I figured you already knew that..."
+    "   It's on slashdot..."
+    "   You don't hear that beeping?..."
+)
+
+venable_response() {
+    local phrase
+    local output
+
+    phrase="${VENABLE_PHRASES[$((RANDOM % ${#VENABLE_PHRASES[@]}))]}"
+    output="$(cat)"
+
+    printf '%s\n\n%s\n' "$output" "$phrase"
+}
+
+# Parse options
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --debug)
+            DEBUG=1
+            shift
+            ;;
+        --think)
+            THINK_OVERRIDE="$2"
+            shift 2
+            ;;
+        --think=*)
+            THINK_OVERRIDE="${1#*=}"
+            shift
+            ;;
+        --hidethinking)
+            HIDE_THINKING=1
+            shift
+            ;;
+        --no-hidethinking)
+            HIDE_THINKING=0
+            shift
+            ;;
+        --verbose)
+            VERBOSE=1
+            shift
+            ;;
+        --no-verbose)
+            VERBOSE=0
+            shift
+            ;;
+        --model)
+            MODEL="$2"
+            shift 2
+            ;;
+        --model=*)
+            MODEL="${1#*=}"
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            break
+            ;;
+    esac
+done
+
+if [ -z "$MODEL" ]; then
+    MODEL="$(ollama list | awk 'NR>1 { size=$3; unit=$4; mult=1; if (unit=="KB") mult=1024; else if (unit=="MB") mult=1024*1024; else if (unit=="GB") mult=1024*1024*1024; else if (unit=="TB") mult=1024*1024*1024*1024; print size*mult, $1 }' | sort -n | head -n 1 | awk '{print $2}')"
+fi
+
+# Validate selected model exists.
+if ! ollama list | awk 'NR>1 {print $1}' | grep -Fxq "$MODEL"; then
+    echo "Model not found: $MODEL" >&2
+    ollama list >&2
+    exit 1
+fi
+
+QUESTION="$*"
+
+if [ -z "$QUESTION" ]; then
+    echo "Usage: ai [--debug] question..." >&2
+    exit 1
+fi
+
+lc_question="$(printf '%s' "$QUESTION" | tr '[:upper:]' '[:lower:]')"
+
+needs_web=0
+needs_think=0
+
+# Needs current information.
+case "$lc_question" in
+    *latest*|*forecast*|*current*|*newest*|*today*|*now*|*news*|*recent*|*release*|*version*|*stable*|*beta*|*rc*|*driver*|*price*|*cost*|*download*|*supported*|*support*|*deprecated*|*eol*|*end\ of\ life*|*available*|*schedule*|*changelog*|*roadmap*|*security*|*cve*|*vulnerability*)
+        needs_web=1
+        ;;
+esac
+
+# Needs deeper reasoning.
+case "$lc_question" in
+    *why*|*explain*|*compare*|*comparison*|*versus*|*\ vs\ *|*troubleshoot*|*debug*|*diagnose*|*root\ cause*|*strategy*|*plan*|*design*|*architecture*|*should\ i*|*best*|*better*|*tradeoff*|*pros\ and\ cons*|*error*|*failed*|*failure*|*fix*|*optimize*|*recommend*|*choose*|*decision*|*what\ do\ you\ think*)
+        needs_think=1
+        ;;
+esac
+
+# If it needs current info plus judgment, use high think.
+if [ "$needs_web" -eq 1 ]; then
+    case "$lc_question" in
+        *best*|*compare*|*should\ i*|*recommend*|*why*|*troubleshoot*|*fix*|*issue*|*problem*|*error*|*better*|*choose*)
+            needs_think=1
+            ;;
+    esac
+fi
+
+if [ "$needs_think" -eq 1 ]; then
+    THINK_LEVEL="high"
+else
+    THINK_LEVEL="low"
+fi
+
+web_search() {
+    python3 - "$QUESTION" <<'PY'
+import html
+import re
+import sys
+import urllib.parse
+import urllib.request
+
+q = sys.argv[1]
+url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": q})
+
+req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+
+try:
+    data = urllib.request.urlopen(req, timeout=20).read().decode("utf-8", "replace")
+except Exception as e:
+    print(f"WEB_SEARCH_ERROR: {e}")
+    sys.exit(0)
+
+blocks = re.findall(
+    r'<a rel="nofollow" class="result__a" href="(.*?)">(.*?)</a>.*?<a class="result__snippet".*?>(.*?)</a>',
+    data,
+    re.S
+)
+
+if not blocks:
+    blocks = re.findall(r'class="result__a" href="(.*?)">(.*?)</a>', data, re.S)
+
+    if not blocks:
+        print("NO_RESULTS")
+        sys.exit(0)
+
+    for i, (link, title) in enumerate(blocks[:8], 1):
+        title = re.sub("<.*?>", "", title)
+        print(f"{i}. {html.unescape(title).strip()}")
+        print(f"   URL: {html.unescape(link).strip()}")
+        print()
+    sys.exit(0)
+
+for i, (link, title, snippet) in enumerate(blocks[:8], 1):
+    title = re.sub("<.*?>", "", title)
+    snippet = re.sub("<.*?>", "", snippet)
+    print(f"{i}. {html.unescape(title).strip()}")
+    print(f"   URL: {html.unescape(link).strip()}")
+    print(f"   Snippet: {html.unescape(snippet).strip()}")
+    print()
+PY
+}
+
+run_ollama() {
+    local prompt="$1"
+    local -a cmd=(ollama run)
+
+    local supports_think=0
+    if ollama run --help 2>/dev/null | grep -q -- '--hidethinking' && ollama show "$MODEL" 2>/dev/null | grep -qi 'thinking'; then
+        supports_think=1
+    fi
+
+    if [ -n "$VERBOSE" ] && [ "$VERBOSE" -eq 1 ]; then
+        cmd+=(--verbose)
+    fi
+
+    # thinking only if user explicitly overrides
+    if [ -n "$THINK_OVERRIDE" ]; then
+        cmd+=(--think="$THINK_OVERRIDE")
+        if [ "${HIDE_THINKING:-}" = "1" ]; then
+            cmd+=(--hidethinking)
+        fi
+    fi
+
+    cmd+=("$MODEL" "$prompt")
+    "${cmd[@]}"
+}
+
+if [ "$DEBUG" -eq 1 ]; then
+    echo "model:       $MODEL"
+    echo "think:       $THINK_LEVEL"
+    echo "web:         $needs_web"
+    echo "question:    $QUESTION"
+    exit 0
+fi
+
+if [ "$needs_web" -eq 1 ]; then
+    RESULTS="$(web_search)"
+
+    if printf '%s\n' "$RESULTS" | grep -q '^WEB_SEARCH_ERROR:'; then
+        printf '%s\n' "$RESULTS" >&2
+        exit 2
+    fi
+
+    if [ "$RESULTS" = "NO_RESULTS" ]; then
+        echo "No web results found." >&2
+        exit 3
+    fi
+
+    run_ollama "Answer the question using only the web search snippets below.
+Rules:
+- If the snippets do not contain the exact version, date, or value requested, say so.
+- Do not guess.
+- Keep it short and direct.
+- Prefer commands first when useful.
+- No tables unless asked.
+Question:
+$QUESTION
+Web search snippets:
+$RESULTS" | venable_response
+else
+    run_ollama "Answer from local knowledge.
+Rules:
+- Keep it short and direct.
+- Prefer commands first when useful.
+- No tables unless asked.
+- If this requires current facts, versions, prices, news, release info, or recent documentation, say that web search is needed.
+Question:
+$QUESTION" | venable_response
+fi
+

@@ -1,0 +1,32 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+NODES_FILE="$SCRIPT_DIR/../etc/nodes.conf"
+
+if [[ ! -f "$NODES_FILE" ]]; then
+    echo "nodes.conf not found at $NODES_FILE" >&2
+    exit 1
+fi
+
+servers=()
+while IFS= read -r line; do
+    servers+=("$line")
+done < <(grep -v '^\s*#' "$NODES_FILE" | grep -v '^\s*$')
+
+if [ -z "$1" ]; then
+    echo "Usage: $0 <source> <destination>"
+    exit 1
+fi
+
+source_files="$1"
+destination_location="$2"
+
+for server in "${servers[@]}"; do
+    echo "$server: $source_files"
+    if ping -c 1 "$server" &>/dev/null; then
+        scp -r $source_files "$server:$destination_location"
+    else
+        echo "Host $server is unreachable"
+    fi
+    echo " "
+done
