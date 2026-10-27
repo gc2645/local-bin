@@ -2,9 +2,10 @@
 # show-gpu-workloads.sh — clean table of what each Vast renter is doing
 #
 # Usage:
-#   ./show-gpu-workloads.sh                  # all hosts
+#   ./show-gpu-workloads.sh                  # all hosts (table)
 #   ./show-gpu-workloads.sh node11 node13    # specific hosts
 #   ./show-gpu-workloads.sh --json           # machine-readable JSON
+#   ./show-gpu-workloads.sh --save           # table + append to JSONL log (for cron)
 
 set -euo pipefail
 
@@ -25,12 +26,27 @@ if [[ "${1:-}" == "--json" ]]; then
     fi
 fi
 
-# --- Run embedded Python (does SSH + formatting) ---
-exec python3 - "${HOSTS[@]}" <<'PYTHON_SCRIPT'
-import subprocess, sys, json, datetime
+# --- Save mode: append to JSONL log ---
+SAVE_MODE=0
+if [[ "${1:-}" == "--save" ]]; then
+    SAVE_MODE=1
+    shift
+    HOSTS=("${@}")
+    if [[ ${#HOSTS[@]} -eq 0 ]]; then
+        HOSTS=(node11 node12 node13 node14 node15 node16 node17 node18 node19)
+    fi
+fi
 
-HOSTS = sys.argv[1:] if len(sys.argv) > 1 else []
+# --- Run embedded Python (does SSH + formatting) ---
+exec python3 - "${HOSTS[@]}" "${SAVE_MODE}" <<'PYTHON_SCRIPT'
+import subprocess, sys, json, datetime, os
+
+HOSTS = sys.argv[1:-1] if len(sys.argv) > 2 else []
+SAVE_MODE = sys.argv[-1] == "1" if len(sys.argv) > 1 else False
 JSON_MODE = "--json" in sys.argv
+
+# Save log path
+SAVE_LOG = "/Users/gcox/src/local-bin/data/gpu-workloads.jsonl"
 
 # ============================================================
 # SSH helper
@@ -721,6 +737,43 @@ for host in HOSTS:
 if JSON_MODE:
     print(json.dumps(results, indent=2))
     sys.exit(0)
+
+# --- Save mode: append one JSON line per host/container ---
+if SAVE_MODE:
+    os.makedirs(os.path.dirname(SAVE_LOG), exist_ok=True)
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat()
+    save_records = []
+    for r in results:
+        host = r.get("host", "?")
+        if "error" in r:
+            save_records.append({"ts": ts, "host": host, "error": r["error"]})
+            continue
+        containers = r.get("containers", [])
+        gpus = r.get("gpu", [])
+        if not containers:
+            save_records.append({"ts": ts, "host": host, "container": None, "label": "idle",
+                                  "gpu": gpus, "process_summary": r.get("process_summary", {})})
+        else:
+            for c in containers:
+                cname = c.get("name", "?")
+                if cname.endswith("/ssh"):
+                    cname = cname[:-4]
+                gpu_info = c.get("gpu", {})
+                connections = c.get("connections", [])
+                proc_summary = c.get("process_summary", {})
+                proc_names = set(proc_summary.keys())
+                label = classify(proc_names, gpu_info.get("mem_mib", 0), connections,
+                                 image=c.get("image", ""),
+                                 cmdlines=r.get("gpu_cmdlines", []),
+                                 ai_cmdlines=r.get("ai_cmdlines", []))
+                save_records.append({
+                    "ts": ts, "host": host, "container": cname, "label": label,
+                    "gpu": gpu_info, "image": c.get("image", ""),
+                    "process_summary": proc_summary,
+                })
+    with open(SAVE_LOG, "a") as f:
+        for rec in save_records:
+            f.write(json.dumps(rec) + "\n")
 
 # --- Table output ---
 hdr = f"{'HOST':<8s} {'INSTANCE':<15s} {'UPTIME':>6s}  {'GPU_NAME':<15s} {'FAN':<6s} {'TEMP':<8s} {'MEM':<5s} {'UTIL':<4s} {'POWER':<10s} {'CLASS':<25s}"
