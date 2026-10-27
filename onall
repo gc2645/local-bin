@@ -1,0 +1,36 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(dirname "${BASH_SOURCE[0]}")"
+NODES_FILE="$SCRIPT_DIR/../etc/nodes.conf"
+
+if [[ ! -f "$NODES_FILE" ]]; then
+    echo "nodes.conf not found at $NODES_FILE" >&2
+    exit 1
+fi
+
+NODES=()
+while IFS= read -r line; do
+    NODES+=("$line")
+done < <(grep -v '^\s*#' "$NODES_FILE" | grep -v '^\s*$')
+
+HISTORY_FILE="$HOME/.onall_history"
+
+if [ $# -ne 1 ]; then
+    echo "########## Error: Exactly one argument required ########## "
+    echo "########## Usage: $0 <command_to_execute> ########## "
+    echo
+    echo
+    exit 1
+fi
+
+COMMAND="$1"
+echo "Command to execute: $COMMAND"
+echo
+
+echo "$(date '+%Y-%m-%d %H:%M:%S') - $COMMAND" >> "$HISTORY_FILE"
+
+for NODE in "${NODES[@]}"; do
+    echo "=== $NODE: $COMMAND ===="
+    ssh -qt "$NODE" "$COMMAND"
+    echo
+done
