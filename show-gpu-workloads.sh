@@ -749,8 +749,6 @@ def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdli
         return "Image Generation"
     if "mining" in img or "miner" in img:
         return "Mining"
-    if "otaiku" in img:
-        return "GPU Compute  otaiku"
 
     # Cmdline-based mining
     coin_str, pool_str = _parse_cmdline_for_mining(cmdlines + (ai_cmdlines or []))
@@ -855,6 +853,13 @@ def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdli
     if proc_names & {"stable_diffusion","diffusers","comfyui",
                       "automatic1111","sd_webui"}:
         return "Image Generation"
+    # ComfyUI via Celery worker (common on rented nodes)
+    for entry in ai_cmdlines + cmdlines + broad_cmdlines:
+        args = entry.get("cmdline", "")
+        if ("celery" in args and ("comfy" in args or "entrypoints" in args)) or \
+           ("celery" in args and "comfyui" in args.lower()) or \
+           ("celery" in args and "8188" in args):
+            return "Image Generation  ComfyUI"
 
     # Rendering (3D/DCC apps)
     render = _extract_rendering(broad_cmdlines)
@@ -886,22 +891,10 @@ def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdli
                      "mariadbd","clickhouse","surrealdb","keydb-server"}:
         return "Database"
 
-    # Web server
-    if proc_names & {"nginx","caddy","httpd","apache2","traefik"}:
-        return "Web Server"
-
-    # Container runtime
-    if proc_names & {"containerd","dockerd","kubelet"}:
-        return "Container Runtime"
-
-    # SSH/session
-    if proc_names & {"sshd","ssh","tmux"}:
-        return "SSH Session"
-
-    # General compute
-    if proc_names & {"python3","python","node","go","java","rust",
-                     "gcc","make","cmake","cargo"}:
-        return "General Compute"
+    # Otaiku (specific GPU workload — keep as fallback)
+    img = (image or "").lower()
+    if "otaiku" in img:
+        return "GPU Compute  otaiku"
 
     return "Unknown"
 
