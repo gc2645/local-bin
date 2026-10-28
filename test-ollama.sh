@@ -194,13 +194,31 @@ has_response() {
 parse_metrics() {
     local logfile="$1"
     local total load pc pr ec er
-    # Duration values are in nanoseconds (e.g. "1234567890 nanoseconds")
-    total=$(awk '/total duration:/ { gsub(/[^0-9.]/, "", $3); if ($3) printf "%.2f", $3/1e9 }' "$logfile")
-    load=$(awk '/load duration:/ { gsub(/[^0-9.]/, "", $3); if ($3) printf "%.2f", $3/1e9 }' "$logfile")
-    pc=$(awk '/prompt count:/ { print $NF }' "$logfile")
-    pr=$(awk '/prompt per second:/ { print $NF }' "$logfile")
-    ec=$(awk '/eval count:/ { print $NF }' "$logfile")
-    er=$(awk '/eval per second:/ { print $NF }' "$logfile")
+
+    # Handle both old (nanoseconds) and new (s/ms) duration formats
+    total=$(awk '/^total duration:/ {
+        val=$3; gsub(/[^0-9.]/,"",val)
+        if ($3~/ms/) printf "%.2f",val/1000
+        else if ($3~/ns/) printf "%.2f",val/1e9
+        else printf "%.2f",val+0
+    }' "$logfile")
+
+    load=$(awk '/^load duration:/ {
+        val=$3; gsub(/[^0-9.]/,"",val)
+        if ($3~/ms/) printf "%.2f",val/1000
+        else if ($3~/ns/) printf "%.2f",val/1e9
+        else printf "%.2f",val+0
+    }' "$logfile")
+
+    pc=$(awk '/prompt eval count:/ {print $NF}' "$logfile")
+    pr=$(awk '/prompt eval rate:/ {
+        for(i=1;i<=NF;i++) if($i~/^[0-9]/){gsub(/[^0-9.]/,"",$i);print $i;break}
+    }' "$logfile")
+    ec=$(awk '/^eval count:/ {print $NF}' "$logfile")
+    er=$(awk '/^eval rate:/ {
+        for(i=1;i<=NF;i++) if($i~/^[0-9]/){gsub(/[^0-9.]/,"",$i);print $i;break}
+    }' "$logfile")
+
     echo "${total:--}|${load:--}|${pc:--}|${pr:--}|${ec:--}|${er:--}"
 }
 
