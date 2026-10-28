@@ -39,7 +39,7 @@ fi
 
 # --- Run embedded Python (does SSH + formatting) ---
 exec python3 - "${HOSTS[@]}" "${SAVE_MODE}" <<'PYTHON_SCRIPT'
-import subprocess, sys, json, datetime, os
+import subprocess, sys, json, datetime, os, re
 
 HOSTS = sys.argv[1:-1] if len(sys.argv) > 2 else []
 SAVE_MODE = sys.argv[-1] == "1" if len(sys.argv) > 1 else False
@@ -239,6 +239,52 @@ MINER_COIN = {
     "miniz": "Multi-algorithm",
 }
 
+# Wallet address patterns: (compiled_regex, coin_abbr)
+# Order matters — more specific patterns first to avoid false positives.
+WALLET_PATTERNS = [
+    # Monero: 4 or 8 prefix, ~95/106 chars (very distinctive)
+    (re.compile(r'\b([48][0-9A-Za-z]{93})\b'), "XMR"),
+    # Ethereum/EVM: 0x + 40 hex = 42 chars
+    (re.compile(r'\b0x[0-9a-fA-F]{40}\b'), "ETH"),
+    # Bitcoin: bech32 (bc1q, bc1p), legacy (1), nested segwit (3)
+    (re.compile(r'\bbc1[0-9A-Za-z]{38,}\b'), "BTC"),
+    (re.compile(r'\bbc1p[0-9A-Za-z]{58}\b'), "BTC"),
+    (re.compile(r'\b[13][1-9A-HJ-NP-Za-km-z]{32,}\b'), "BTC"),
+    # Litecoin: L/M prefix or ltc1
+    (re.compile(r'\bltc1[0-9A-Za-z]{15,}\b'), "LTC"),
+    (re.compile(r'\b[LmM][1-9A-HJ-NP-Za-km-z]{32,}\b'), "LTC"),
+    # Dogecoin: D or A prefix
+    (re.compile(r'\b[D9A][1-9A-HJ-NP-Za-km-z]{32,}\b'), "DOGE"),
+    # TRON: T prefix + 33 alphanumeric
+    (re.compile(r'\bT[1-9A-HJ-NP-Za-km-z]{33}\b'), "TRX"),
+    # Zcash: t1, t3, u1, or zs1
+    (re.compile(r'\b[ut]1[0-9A-Za-z]{3,}\b'), "ZEC"),
+    (re.compile(r'\bzs1[0-9A-Za-z]{75,}\b'), "ZEC"),
+    # XRP: r prefix + 25-33 chars
+    (re.compile(r'\br[1-9A-HJ-NP-Za-km-z]{24,33}\b'), "XRP"),
+    # Stellar: G prefix + 55 chars
+    (re.compile(r'\bG[0-9A-Za-z]{55}\b'), "XLM"),
+    # Cardano: addr1 or stake1 prefix
+    (re.compile(r'\b(addr1|stake1)[0-9A-Za-z]+'), "ADA"),
+    # Polkadot: 1 + 46 hex-like chars
+    (re.compile(r'\b[1][0-9A-Za-z]{46}\b'), "DOT"),
+    # Cosmos: cosmos1 prefix
+    (re.compile(r'\bcosmos1[0-9A-Za-z]{38}\b'), "ATOM"),
+    # Bitcoin Cash: bitcoincash:q or bitcoincash:p
+    (re.compile(r'\bbitcoincash:[qP][0-9A-Za-z]{11,}\b'), "BCH"),
+    # TON: EQ or UQ prefix + 46 chars
+    (re.compile(r'\b(EQ|UQ)[0-9A-Za-z_-]{46}\b'), "TON"),
+    # Nano: nano_ prefix + 60 chars
+    (re.compile(r'\bnano_[0-9A-Za-z]{60}\b'), "XNO"),
+    # Solana: base58, 32-44 chars (no fixed prefix — use cautiously)
+    # Only match if surrounded by known wallet flags like -u, --wallet, --user
+    (re.compile(r'(--wallet|-u)\s+[7-9A-HJ-NP-Za-km-z]{32,44}\b'), "SOL"),
+    # Generic: --user/-u flag with long base58-looking string (common in miners)
+    # Match -u or --user followed by a base58 address that's 26-66 chars
+    # but NOT the short ones already matched above
+    (re.compile(r'(--wallet|-u)\s+([13][1-9A-HJ-NP-Za-km-z]{25,66})\b'), "BTC"),
+]
+
 COIN_NAMES = {
     "BTX": "BitTorrent",
     "XMR": "Monero",
@@ -377,6 +423,10 @@ def _parse_cmdline_for_mining(cmdlines):
                 coins.add("Multi")
             elif bin_name in ("tlbminer", "tftminer", "xhminer"):
                 coins.add("Multi")
+        # Wallet address detection (catches coins even with unknown miners)
+        for pattern, coin in WALLET_PATTERNS:
+            if pattern.search(args):
+                coins.add(coin)
 
     pool_names = set()
     pool_coins = set()
