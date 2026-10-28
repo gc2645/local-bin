@@ -665,11 +665,11 @@ if (( TEST_TOOLS )); then
   echo "otest: $(date '+%Y-%m-%d %H:%M:%S %Z') flags: --test-tools -H $HOST -t $TIMEOUT${THINK:+ --think=$THINK}"
   printf '%-26s %6s %6s %6s %8s %8s %7s\n' \
     "MODEL" "TestA" "TestB" "TestC" "Total(s)" "Eval#" "tok/s"
-  printf '%-26s %6s %6s %6s %8s %8s %7s\n' \
-    "--------------------------" "------" "------" "------" "--------" "-------" "-------"
+  printf '%-40s %6s %6s %6s %8s %8s %7s\n' \
+    "----------------------------------------" "------" "------" "------" "--------" "-------" "-------"
   for i in "${!T_SUM_M[@]}"; do
-    printf '%-26s %6s %6s %6s %8s %8s %7s\n' \
-      "${T_SUM_M[$i]:0:26}" "${T_SUM_A[$i]}" "${T_SUM_B[$i]}" "${T_SUM_C[$i]}" \
+    printf '%-40s %6s %6s %6s %8s %8s %7s\n' \
+      "${T_SUM_M[$i]:0:40}" "${T_SUM_A[$i]}" "${T_SUM_B[$i]}" "${T_SUM_C[$i]}" \
       "${T_SUM_TE[$i]}" "${T_SUM_TC[$i]}" "${T_SUM_ER[$i]}"
   done
   echo "------------------------------------------------------------------------------"
@@ -753,9 +753,9 @@ if (( LOGIC_TEST )); then
     fi
   done
   echo '=============================================================================='
-  printf '%-26s %-27s %-8s %9s\n' MODEL THINK CORRECT 'TOTAL(s)'
+  printf '%-40s %-27s %-8s %9s\n' MODEL THINK CORRECT 'TOTAL(s)'
   for i in "${!L_MODELS[@]}"; do
-    printf '%-26s %-27s %-8s %9s\n' "${L_MODELS[$i]:0:26}" "${L_THINK[$i]}" "${L_SCORES[$i]}" "${L_TIME[$i]}"
+    printf '%-40s %-27s %-8s %9s\n' "${L_MODELS[$i]:0:40}" "${L_THINK[$i]}" "${L_SCORES[$i]}" "${L_TIME[$i]}"
   done
   echo "Scenarios passed: $total_pass; failed: $total_fail"
   echo '=============================================================================='
@@ -871,12 +871,12 @@ echo "==========================================================================
 echo "otest: $(date '+%Y-%m-%d %H:%M:%S %Z') flags: -H $HOST -t $TIMEOUT${THINK:+ --think=$THINK}${HIDE_THINKING:+ --hidethinking}${PROMPT_FILE:+ -f $PROMPT_FILE}"
 printf '%-26s %-6s %9s %8s %7s %9s %6s %8s %8s %-25s %s\n' \
   "MODEL" "RESULT" "TOTAL(s)" "LOAD(s)" "PROMPT#" "PROMPT/s" "EVAL#" "EVAL/s" "SIZE" "THINK" "LOGIC"
-printf '%-26s %-6s %9s %8s %7s %9s %6s %8s %8s %-25s %s\n' \
-  "--------------------------" "------" "--------" "-------" "-------" "--------" "------" "-------" "--------" "-------------------------" "-----"
+printf '%-40s %-6s %9s %8s %7s %9s %6s %8s %8s %-25s %s\n' \
+  "----------------------------------------" "------" "--------" "-------" "-------" "--------" "------" "-------" "--------" "-------------------------" "-----"
 for i in "${!SUM_M[@]}"; do
   IFS='|' read -r t l pc pr ec er <<< "${SUM_R[$i]}"
-  printf '%-26s %-6s %9s %8s %7s %9s %6s %8s %8s %-25s %s\n' \
-    "${SUM_M[$i]:0:26}" "${SUM_S[$i]}" "$t" "$l" "$pc" "$pr" "$ec" "$er" "${SUM_SZ[$i]}" "${THINK_LABELS[$i]}" "${LOGIC_GRADES[$i]}"
+  printf '%-40s %-6s %9s %8s %7s %9s %6s %8s %8s %-25s %s\n' \
+    "${SUM_M[$i]:0:40}" "${SUM_S[$i]}" "$t" "$l" "$pc" "$pr" "$ec" "$er" "${SUM_SZ[$i]}" "${THINK_LABELS[$i]}" "${LOGIC_GRADES[$i]}"
 done
 echo "------------------------------------------------------------------------------"
 printf '%d models: %d passed, %d failed, %d skipped\n' "${#SUM_M[@]}" "$pass" "$fail" "$skip"
