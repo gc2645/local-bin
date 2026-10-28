@@ -894,7 +894,7 @@ def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdli
     # Otaiku (specific GPU workload — keep as fallback)
     img = (image or "").lower()
     if "otaiku" in img:
-        return "GPU Compute  otaiku"
+        return "Image Generation  otaiku"
 
     return "Unknown"
 
