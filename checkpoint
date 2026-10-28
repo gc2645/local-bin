@@ -52,8 +52,19 @@ for file in "$@"; do
 
     filename=$(basename "$file")
 
-    mtime_epoch=$(stat -c %Y "$file")
-    timestamp=$(date -d "@$mtime_epoch" +%Y%m%d-%H%M%S)
+    # Cross-platform: detect GNU vs BSD stat
+    if stat -c . /dev/null &>/dev/null; then
+        mtime_epoch=$(stat -c %Y "$file")
+    else
+        mtime_epoch=$(stat -f %m "$file")
+    fi
+
+    # Cross-platform: detect GNU vs BSD date
+    if date -d @1 &>/dev/null; then
+        timestamp=$(date -d "@$mtime_epoch" +%Y%m%d-%H%M%S)
+    else
+        timestamp=$(date -r @$mtime_epoch +%Y%m%d-%H%M%S)
+    fi
 
     base="$DEST_DIR/${filename}.${timestamp}"
     dest="$base"
