@@ -853,13 +853,14 @@ def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdli
     if proc_names & {"stable_diffusion","diffusers","comfyui",
                       "automatic1111","sd_webui"}:
         return "Image Generation"
-    # ComfyUI via Celery worker (common on rented nodes)
-    for entry in ai_cmdlines + cmdlines + broad_cmdlines:
-        args = entry.get("cmdline", "")
-        if ("celery" in args and ("comfy" in args or "entrypoints" in args)) or \
-           ("celery" in args and "comfyui" in args.lower()) or \
-           ("celery" in args and "8188" in args):
-            return "Image Generation  ComfyUI"
+    # ComfyUI via Celery worker (common on rented nodes, not otaiku)
+    if "otaiku" not in (image or "").lower():
+        for entry in ai_cmdlines + cmdlines + broad_cmdlines:
+            args = entry.get("cmdline", "")
+            if ("celery" in args and "comfy" in args and "comfyui" not in args.lower()) or \
+               ("celery" in args and "comfyui" in args.lower()) or \
+               ("celery" in args and "8188" in args and "comfy" not in args):
+                return "Image Generation  ComfyUI"
 
     # Rendering (3D/DCC apps)
     render = _extract_rendering(broad_cmdlines)
