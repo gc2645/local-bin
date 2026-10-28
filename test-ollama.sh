@@ -360,6 +360,28 @@ ensure_idle() {
   wait_idle || echo "otest: warning: model(s) remain resident" >&2
 }
 
+# Generate a table separator line given column widths
+# Usage: table_sep 40 6 6 6 8 8 7
+table_sep() {
+  local sep=""
+  for w in "$@"; do
+    [[ -n "$sep" ]] && sep+=" "
+    sep+=$(printf "%-${w}s" "" | tr ' ' '-')
+  done
+  echo "$sep"
+}
+
+# Compute max model name length from an array of names, with padding
+# Usage: max_model_len "${ARRAY[@]}" [padding]
+max_model_len() {
+  local max=0 m p="${2:-2}"
+  for m in "$@"; do
+    (( ${#m} > max )) && max=${#m}
+  done
+  (( max + p > 10 )) || max=8
+  echo $(( max + p ))
+}
+
 # --- tool-calling tests -------------------------------------------------------
 
 # JSON tool schema for Tests A/B/C
@@ -663,13 +685,16 @@ if (( TEST_TOOLS )); then
   echo
   echo "=============================================================================="
   echo "otest: $(date '+%Y-%m-%d %H:%M:%S %Z') flags: --test-tools -H $HOST -t $TIMEOUT${THINK:+ --think=$THINK}"
-  printf '%-26s %6s %6s %6s %8s %8s %7s\n' \
+
+  # Dynamic width: fit longest model name
+  _mlen=$(max_model_len "${T_SUM_M[@]}")
+  printf "%-${_mlen}s %-6s %-6s %-6s %-8s %-8s %-7s\n" \
     "MODEL" "TestA" "TestB" "TestC" "Total(s)" "Eval#" "tok/s"
-  printf '%-40s %6s %6s %6s %8s %8s %7s\n' \
-    "----------------------------------------" "------" "------" "------" "--------" "-------" "-------"
+  table_sep $_mlen 6 6 6 8 8 7
+
   for i in "${!T_SUM_M[@]}"; do
-    printf '%-40s %6s %6s %6s %8s %8s %7s\n' \
-      "${T_SUM_M[$i]:0:40}" "${T_SUM_A[$i]}" "${T_SUM_B[$i]}" "${T_SUM_C[$i]}" \
+    printf "%-${_mlen}s %-6s %-6s %-6s %-8s %-8s %-7s\n" \
+      "${T_SUM_M[$i]:0:$_mlen}" "${T_SUM_A[$i]}" "${T_SUM_B[$i]}" "${T_SUM_C[$i]}" \
       "${T_SUM_TE[$i]}" "${T_SUM_TC[$i]}" "${T_SUM_ER[$i]}"
   done
   echo "------------------------------------------------------------------------------"
@@ -753,9 +778,13 @@ if (( LOGIC_TEST )); then
     fi
   done
   echo '=============================================================================='
-  printf '%-40s %-27s %-8s %9s\n' MODEL THINK CORRECT 'TOTAL(s)'
+
+  # Dynamic width: fit longest model name
+  _mlen=$(max_model_len "${L_MODELS[@]}")
+  printf "%-${_mlen}s %-27s %-8s %9s\n" MODEL THINK CORRECT 'TOTAL(s)'
+  table_sep $_mlen 27 8 9
   for i in "${!L_MODELS[@]}"; do
-    printf '%-40s %-27s %-8s %9s\n' "${L_MODELS[$i]:0:40}" "${L_THINK[$i]}" "${L_SCORES[$i]}" "${L_TIME[$i]}"
+    printf "%-${_mlen}s %-27s %-8s %9s\n" "${L_MODELS[$i]:0:$_mlen}" "${L_THINK[$i]}" "${L_SCORES[$i]}" "${L_TIME[$i]}"
   done
   echo "Scenarios passed: $total_pass; failed: $total_fail"
   echo '=============================================================================='
@@ -869,14 +898,16 @@ SUMMARY_FILE="results-test-ollama"
 {
 echo "=============================================================================="
 echo "otest: $(date '+%Y-%m-%d %H:%M:%S %Z') flags: -H $HOST -t $TIMEOUT${THINK:+ --think=$THINK}${HIDE_THINKING:+ --hidethinking}${PROMPT_FILE:+ -f $PROMPT_FILE}"
-printf '%-26s %-6s %9s %8s %7s %9s %6s %8s %8s %-25s %s\n' \
+
+# Dynamic width: fit longest model name
+_mlen=$(max_model_len "${SUM_M[@]}")
+printf "%-${_mlen}s %-6s %9s %8s %7s %9s %6s %8s %8s %-25s %s\n" \
   "MODEL" "RESULT" "TOTAL(s)" "LOAD(s)" "PROMPT#" "PROMPT/s" "EVAL#" "EVAL/s" "SIZE" "THINK" "LOGIC"
-printf '%-40s %-6s %9s %8s %7s %9s %6s %8s %8s %-25s %s\n' \
-  "----------------------------------------" "------" "--------" "-------" "-------" "--------" "------" "-------" "--------" "-------------------------" "-----"
+table_sep $_mlen 6 9 8 7 9 6 8 8 25 1
 for i in "${!SUM_M[@]}"; do
   IFS='|' read -r t l pc pr ec er <<< "${SUM_R[$i]}"
-  printf '%-40s %-6s %9s %8s %7s %9s %6s %8s %8s %-25s %s\n' \
-    "${SUM_M[$i]:0:40}" "${SUM_S[$i]}" "$t" "$l" "$pc" "$pr" "$ec" "$er" "${SUM_SZ[$i]}" "${THINK_LABELS[$i]}" "${LOGIC_GRADES[$i]}"
+  printf "%-${_mlen}s %-6s %9s %8s %7s %9s %6s %8s %8s %-25s %s\n" \
+    "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "$t" "$l" "$pc" "$pr" "$ec" "$er" "${SUM_SZ[$i]}" "${THINK_LABELS[$i]}" "${LOGIC_GRADES[$i]}"
 done
 echo "------------------------------------------------------------------------------"
 printf '%d models: %d passed, %d failed, %d skipped\n' "${#SUM_M[@]}" "$pass" "$fail" "$skip"
