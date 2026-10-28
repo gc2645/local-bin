@@ -130,6 +130,15 @@ def fetch_host(host):
             if len(parts) >= 3:
                 ai_cmdlines.append({"pid": parts[0], "comm": parts[1], "cmdline": parts[2]})
 
+    # Broad process scan for all GPU-relevant categories
+    broad_raw = ssh_cmd(host, "sudo -n ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE 'blender|maya|houdini|3ds|max|cinema|cinema4d|resolve|davinci|kdenlive|kde|godot|unity|gazebo|meshlab|colmap|open3d|pcl|nerf|nerfstudio|viser|obla|obs|ffmpeg|nvenc|nvdec|x264|x265|handbrake|gstreamer|gst-launch|audacity|ardour|lmms|fluidsynth|sonic-pi|coqui|silero|piper|elevenlabs|openvoice|whisper|stable-baselines|gazebo|urdf|ros|rviz|pcl_visualizer|meshlabserver|colmap_gui|colmap|nerfstudio|viser|stable_diffusion|comfyui' | grep -v grep")
+    broad_cmdlines = []
+    if broad_raw and broad_raw.strip():
+        for line in broad_raw.strip().splitlines():
+            parts = line.split(None, 2)
+            if len(parts) >= 3:
+                broad_cmdlines.append({"pid": parts[0], "comm": parts[1], "cmdline": parts[2]})
+
     # Also scan inside running containers (isolated PID ns)
     for c in snap.get("containers", []):
         cname = c.get("name", "")
@@ -140,6 +149,13 @@ def fetch_host(host):
                     parts = line.split(None, 2)
                     if len(parts) >= 3:
                         ai_cmdlines.append({"pid": parts[0], "comm": parts[1], "cmdline": parts[2]})
+            # Broad scan inside containers
+            dock_broad = ssh_cmd(host, f"sudo -n docker exec {cname} ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE 'blender|maya|houdini|3ds|max|cinema|cinema4d|resolve|davinci|kdenlive|kde|godot|unity|gazebo|meshlab|colmap|open3d|pcl|nerf|nerfstudio|viser|obla|obs|ffmpeg|nvenc|nvdec|x264|x265|handbrake|gstreamer|gst-launch|audacity|ardour|lmms|fluidsynth|sonic-pi|coqui|silero|piper|elevenlabs|openvoice|whisper|stable-baselines|gazebo|urdf|ros|rviz|pcl_visualizer|meshlabserver|colmap_gui|colmap|nerfstudio|viser|stable_diffusion|comfyui' | grep -v grep | grep -v 'tee -a'")
+            if dock_broad and dock_broad.strip():
+                for line in dock_broad.strip().splitlines():
+                    parts = line.split(None, 2)
+                    if len(parts) >= 3:
+                        broad_cmdlines.append({"pid": parts[0], "comm": parts[1], "cmdline": parts[2]})
 
     if ai_cmdlines:
         snap["ai_cmdlines"] = ai_cmdlines
@@ -591,9 +607,117 @@ def _extract_training_info(cmdlines):
             return project, model
     return None, None
 
-def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdlines=None):
+# ============================================================
+# Category detection helpers
+# ============================================================
+
+def _extract_rendering(cmdlines):
+    """Detect 3D rendering / DCC apps."""
+    apps = {
+        "blender": "Blender",
+        "maya": "Maya",
+        "houdini": "Houdini",
+        "3dsmax": "3ds Max",
+        "cinema": "Cinema 4D",
+        "cinema4d": "Cinema 4D",
+        "godot": "Godot",
+        "unity": "Unity",
+        "gazebo": "Gazebo",
+        "meshlabserver": "MeshLab",
+        "meshlab": "MeshLab",
+    }
+    for entry in cmdlines:
+        args = entry.get("cmdline", "").lower()
+        for key, name in apps.items():
+            if key in args:
+                return name
+    return None
+
+def _extract_video(cmdlines):
+    """Detect video encoding / capture apps."""
+    apps = {
+        "ffmpeg": "FFmpeg",
+        "nvenc": "NVENC",
+        "nvdec": "NVDEC",
+        "x264": "x264",
+        "x265": "x265",
+        "obs": "OBS",
+        "obs-studio": "OBS",
+        "handbrake": "HandBrake",
+        "gstreamer": "GStreamer",
+        "gst-launch": "GStreamer",
+        "gst-launch-1.0": "GStreamer",
+    }
+    for entry in cmdlines:
+        args = entry.get("cmdline", "").lower()
+        for key, name in apps.items():
+            if key in args:
+                return name
+    return None
+
+def _extract_3d(cmdlines):
+    """Detect 3D processing / scanning / NeRF apps."""
+    apps = {
+        "colmap": "COLMAP",
+        "colmap_gui": "COLMAP",
+        "open3d": "Open3D",
+        "pcl_visualizer": "PCL",
+        "pcl": "PCL",
+        "nerfstudio": "NeRF Studio",
+        "nerf": "NeRF",
+        "viser": "Viser",
+        "obla": "Obla",
+        "urdf": "URDF",
+        "ros": "ROS",
+        "rviz": "RViz",
+    }
+    for entry in cmdlines:
+        args = entry.get("cmdline", "").lower()
+        for key, name in apps.items():
+            if key in args:
+                return name
+    return None
+
+def _extract_audio(cmdlines):
+    """Detect audio/music production apps."""
+    apps = {
+        "audacity": "Audacity",
+        "ardour": "Ardour",
+        "lmms": "LMMS",
+        "fluidsynth": "FluidSynth",
+        "sonic-pi": "Sonic Pi",
+        "sonicpi": "Sonic Pi",
+    }
+    for entry in cmdlines:
+        args = entry.get("cmdline", "").lower()
+        for key, name in apps.items():
+            if key in args:
+                return name
+    return None
+
+def _extract_speech(cmdlines):
+    """Detect speech/voice apps beyond Whisper."""
+    apps = {
+        "coqui": "Coqui TTS",
+        "silero": "Silero",
+        "piper": "Piper",
+        "elevenlabs": "ElevenLabs",
+        "openvoice": "OpenVoice",
+        "stable_baselines": "Stable-Baselines",
+        "stable-baselines": "Stable-Baselines",
+        "stable_baselines3": "Stable-Baselines3",
+    }
+    for entry in cmdlines:
+        args = entry.get("cmdline", "").lower()
+        for key, name in apps.items():
+            if key in args:
+                return name
+    return None
+
+def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdlines=None, broad_cmdlines=None):
     cmdlines = cmdlines or []
     ai_cmdlines = ai_cmdlines or []
+    broad_cmdlines = broad_cmdlines or []
 
     # AI inference from live process scan (most detailed)
     ai_engine, ai_model = _extract_ai_info(ai_cmdlines)
@@ -732,6 +856,31 @@ def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdli
                       "automatic1111","sd_webui"}:
         return "Image Generation"
 
+    # Rendering (3D/DCC apps)
+    render = _extract_rendering(broad_cmdlines)
+    if render:
+        return f"Rendering  {render}"
+
+    # Video (encoding/capture)
+    video = _extract_video(broad_cmdlines)
+    if video:
+        return f"Video  {video}"
+
+    # 3D / scanning / NeRF
+    d3d = _extract_3d(broad_cmdlines)
+    if d3d:
+        return f"3D/Scan  {d3d}"
+
+    # Audio/music production
+    audio = _extract_audio(broad_cmdlines)
+    if audio:
+        return f"Audio  {audio}"
+
+    # Speech/voice beyond Whisper
+    speech = _extract_speech(broad_cmdlines)
+    if speech:
+        return f"Speech/Voice  {speech}"
+
     # Database
     if proc_names & {"postgres","mongod","redis-server","valkey-server",
                      "mariadbd","clickhouse","surrealdb","keydb-server"}:
@@ -839,7 +988,8 @@ if SAVE_MODE:
                 label = classify(proc_names, gpu_info.get("mem_mib", 0), connections,
                                  image=c.get("image", ""),
                                  cmdlines=r.get("gpu_cmdlines", []),
-                                 ai_cmdlines=r.get("ai_cmdlines", []))
+                                 ai_cmdlines=r.get("ai_cmdlines", []),
+                                  broad_cmdlines=r.get("broad_cmdlines", []))
                 save_records.append({
                     "ts": ts, "host": host, "container": cname, "label": label,
                     "gpu": gpu_info, "image": c.get("image", ""),
@@ -892,7 +1042,8 @@ for r in results:
         label = classify(proc_names, gpu_mem, connections,
                          image=c.get("image", ""),
                          cmdlines=r.get("gpu_cmdlines", []),
-                         ai_cmdlines=r.get("ai_cmdlines", []))
+                         ai_cmdlines=r.get("ai_cmdlines", []),
+                                  broad_cmdlines=r.get("broad_cmdlines", []))
 
         gpu_data, gpu_data2 = build_gpu_str(gpus)
         if gpu_data is None:
