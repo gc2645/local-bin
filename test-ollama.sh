@@ -374,7 +374,7 @@ table_sep() {
 # Compute max model name length from an array of names, with padding
 # Usage: max_model_len "${ARRAY[@]}" [padding]
 max_model_len() {
-  local max=0 m p="${2:-2}"
+  local max=0 m p=2
   for m in "$@"; do
     (( ${#m} > max )) && max=${#m}
   done
