@@ -195,7 +195,7 @@ parse_metrics() {
     local logfile="$1"
     local total load pc pr ec er
 
-    # Handle both old (nanoseconds) and new (s/ms) duration formats
+    # Duration: handle s, ms, and ns formats
     total=$(awk '/^total duration:/ {
         val=$3; gsub(/[^0-9.]/,"",val)
         if ($3~/ms/) printf "%.2f",val/1000
@@ -210,11 +210,18 @@ parse_metrics() {
         else printf "%.2f",val+0
     }' "$logfile")
 
-    pc=$(awk '/prompt eval count:/ {print $NF}' "$logfile")
-    pr=$(awk '/prompt eval rate:/ {
+    # Count fields: find first purely numeric field (skip unit labels like "token(s)")
+    pc=$(awk '/prompt eval count:/ || /prompt count:/ {
+        for(i=1;i<=NF;i++) if($i~/^[0-9]+$/){print $i;break}
+    }' "$logfile")
+    ec=$(awk '/^eval count:/ {
+        for(i=1;i<=NF;i++) if($i~/^[0-9]+$/){print $i;break}
+    }' "$logfile")
+
+    # Rate fields: first field starting with a digit, strip non-numeric
+    pr=$(awk '/prompt eval rate:/ || /prompt rate:/ {
         for(i=1;i<=NF;i++) if($i~/^[0-9]/){gsub(/[^0-9.]/,"",$i);print $i;break}
     }' "$logfile")
-    ec=$(awk '/^eval count:/ {print $NF}' "$logfile")
     er=$(awk '/^eval rate:/ {
         for(i=1;i<=NF;i++) if($i~/^[0-9]/){gsub(/[^0-9.]/,"",$i);print $i;break}
     }' "$logfile")
