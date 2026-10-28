@@ -69,6 +69,8 @@ EOF
 
 die() { echo "otest: $*" >&2; exit 1; }
 
+(( $# == 0 )) && { usage; exit 0; }
+
 while (( $# )); do
   case "$1" in
     -H|--host)     [[ $# -ge 2 ]] || die "$1 needs a value"; HOST="$2"; shift 2 ;;
@@ -185,6 +187,21 @@ response_text() {
 
 has_response() {
   response_text "$1"
+}
+
+# Parse the Ollama CLI metrics block at the end of a run log.
+# Outputs: total|load|prompt_count|prompt_rate|eval_count|eval_rate
+parse_metrics() {
+    local logfile="$1"
+    local total load pc pr ec er
+    # Duration values are in nanoseconds (e.g. "1234567890 nanoseconds")
+    total=$(awk '/total duration:/ { gsub(/[^0-9.]/, "", $3); if ($3) printf "%.2f", $3/1e9 }' "$logfile")
+    load=$(awk '/load duration:/ { gsub(/[^0-9.]/, "", $3); if ($3) printf "%.2f", $3/1e9 }' "$logfile")
+    pc=$(awk '/prompt count:/ { print $NF }' "$logfile")
+    pr=$(awk '/prompt per second:/ { print $NF }' "$logfile")
+    ec=$(awk '/eval count:/ { print $NF }' "$logfile")
+    er=$(awk '/eval per second:/ { print $NF }' "$logfile")
+    echo "${total:--}|${load:--}|${pc:--}|${pr:--}|${ec:--}|${er:--}"
 }
 
 # Five independent, machine-scored infrastructure scenarios. Each answer is JSON.
