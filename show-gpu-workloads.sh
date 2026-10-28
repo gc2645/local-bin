@@ -122,7 +122,7 @@ def fetch_host(host):
                 snap["gpu_cmdlines"] = gpu_cmdlines
 
     # Enhance: AI process scan (may be idle, not in nvidia-smi)
-    aip_raw = ssh_cmd(host, "sudo -n ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE 'vllm|ollama|llama[.]cpp|llama-server|sglang|text-generation|lmdeploy|tensorrt|train[.]py|torchrun|accelerate|deepspeed|finetune|--epochs|--pretrain' | grep -v grep")
+    aip_raw = ssh_cmd(host, "sudo -n ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE 'vllm|ollama|llama[.]cpp|llama-server|sglang|text-generation|lmdeploy|tensorrt|train[.]py|torchrun|accelerate|deepspeed|finetune|--epochs|--pretrain|miner' | grep -v grep")
     ai_cmdlines = []
     if aip_raw and aip_raw.strip():
         for line in aip_raw.strip().splitlines():
@@ -134,7 +134,7 @@ def fetch_host(host):
     for c in snap.get("containers", []):
         cname = c.get("name", "")
         if cname.startswith("C."):
-            dock_out = ssh_cmd(host, f"sudo -n docker exec {cname} ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE 'vllm|ollama|llama[.]cpp|sglang|text-generation|lmdeploy|tensorrt|train[.]py|torchrun|accelerate|deepspeed|finetune|--epochs|--pretrain' | grep -v grep")
+            dock_out = ssh_cmd(host, f"sudo -n docker exec {cname} ps -eo pid,comm,args --no-headers 2>/dev/null | grep -iE 'vllm|ollama|llama[.]cpp|sglang|text-generation|lmdeploy|tensorrt|train[.]py|torchrun|accelerate|deepspeed|finetune|--epochs|--pretrain|miner' | grep -v grep | grep -v 'tee -a'")
             if dock_out and dock_out.strip():
                 for line in dock_out.strip().splitlines():
                     parts = line.split(None, 2)
@@ -223,6 +223,20 @@ MINER_COIN = {
     "teamredminer": "Multi-algorithm",
     "autolykos": "ETC",
     "progpow": "ZIL/ETHW",
+    "bzminer": "Multi-algorithm",
+    "wildrig": "Multi-algorithm",
+    "rigel": "Multi-algorithm",
+    "onezerominer": "Multi-algorithm",
+    "peakminer": "Multi-algorithm",
+    "nekominer": "Multi-coin",
+    "suprminer": "Multi-algorithm",
+    "rgminer": "Multi-algorithm",
+    "gminer": "Multi-algorithm",
+    "trex": "Multi-algorithm",
+    "cpuminer-opt": "Multi-algorithm",
+    "cpuminer-multi": "Multi-algorithm",
+    "nanominer": "Multi-algorithm",
+    "miniz": "Multi-algorithm",
 }
 
 COIN_NAMES = {
@@ -317,7 +331,9 @@ def _parse_cmdline_for_mining(cmdlines):
         if "celery" in full_lower or "daphne" in full_lower or "gunicorn" in full_lower or "uvicorn" in full_lower:
             # Task queue / web server processes — not miners
             continue
-        if bin_name in ("supervisord", "systemd", "bash", "sh", "python",
+        if bin_name in ("tee", "tail", "cat", "exec", "sh", "zsh", "csh"):
+            continue
+        if bin_name in ("supervisord", "systemd", "bash", "python",
                         "python3", "node", "ruby", "java"):
             # Only check for explicit miner binaries, skip --pool/--algorithm
             if "/forgeminer" in args:
@@ -327,14 +343,18 @@ def _parse_cmdline_for_mining(cmdlines):
             elif "/ethminer" in args or "/miner" in args:
                 if not coins:
                     coins.add("ETH/ETC")
+            # Catch python3/bash-wrapped miners by filename substring
+            elif "miner" in full_lower.split()[-1].lower() or "miner" in full_lower:
+                if not coins:
+                    coins.add("Multi")
             continue
         for i, p in enumerate(parts):
-            if p == "--algorithm" and i + 1 < len(parts):
+            if p in ("--algorithm", "-a") and i + 1 < len(parts):
                 coins.add(parts[i + 1].upper())
             elif p.startswith("--algorithm="):
                 coins.add(p.split("=", 1)[1].upper())
         for i, p in enumerate(parts):
-            if p == "--pool" and i + 1 < len(parts):
+            if p in ("--pool", "-o") and i + 1 < len(parts):
                 pools.add(parts[i + 1])
             elif p.startswith("--pool="):
                 pools.add(p.split("=", 1)[1])
@@ -559,7 +579,7 @@ def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdli
         return "GPU Compute  otaiku"
 
     # Cmdline-based mining
-    coin_str, pool_str = _parse_cmdline_for_mining(cmdlines)
+    coin_str, pool_str = _parse_cmdline_for_mining(cmdlines + (ai_cmdlines or []))
     if coin_str or pool_str:
         if coin_str and pool_str:
             return f"Mining  {coin_str} via {pool_str}"
@@ -592,6 +612,10 @@ def classify(proc_names, gpu_mem, connections, image="", cmdlines=None, ai_cmdli
         if pool_str:
             return f"Mining  {coin_str} via {pool_str}"
         return f"Mining  {coin_str}"
+
+    # Catch any process name containing "miner" (e.g. croll_gpu_miner.py)
+    if any("miner" in p.lower() for p in proc_names):
+        return "Mining  Multi"
 
     # Mining pool connections (no miner proc)
     for conn in connections:
