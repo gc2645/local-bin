@@ -3,15 +3,35 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 NODES_FILE="$(cd "$SCRIPT_DIR/.." && pwd -P)/etc/nodes.conf"
 
-if [[ ! -f "$NODES_FILE" ]]; then
-    echo "nodes.conf not found at $NODES_FILE" >&2
-    exit 1
-fi
+get_plugs() {
+    local result
+    result=$(dig AXFR cox.lan @node20 2>/dev/null)
+    if [[ $? -ne 0 || -z "$result" ]]; then
+        echo "Zone transfer failed (dig AXFR cox.lan @node20)" >&2
+        exit 1
+    fi
+    echo "$result" | grep '\-plug\.cox\.lan\.' | cut -d'.' -f1
+}
 
-servers=()
-while IFS= read -r line; do
-    servers+=("$line")
-done < <(grep -v '^\s*#' "$NODES_FILE" | grep -v '^\s*$')
+get_nodes() {
+    if [[ ! -f "$NODES_FILE" ]]; then
+        echo "nodes.conf not found at $NODES_FILE" >&2
+        exit 1
+    fi
+    grep -v '^\s*#' "$NODES_FILE" | grep -v '^\s*$'
+}
+
+if [[ "${1:-}" == "--plugs" ]]; then
+    servers=()
+    while IFS= read -r line; do
+        servers+=("$line")
+    done < <(get_plugs)
+else
+    servers=()
+    while IFS= read -r line; do
+        servers+=("$line")
+    done < <(get_nodes)
+fi
 
 for server in "${servers[@]}"; do
     if ping -W 1 -c 1 "$server" &>/dev/null; then
