@@ -33,8 +33,9 @@ SAVE_MODE=0
 if [[ "${1:-}" == "--save" ]]; then
     SAVE_MODE=1
     shift
-    HOSTS=("${@}")
-    if [[ ${#HOSTS[@]} -eq 0 ]]; then
+    if [[ $# -gt 0 ]]; then
+        HOSTS=("$@")
+    else
         HOSTS=(node11 node12 node13 node14 node15 node16 node17 node18 node19)
     fi
 fi
