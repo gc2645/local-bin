@@ -134,24 +134,29 @@ def format_gpu_name(raw):
     return name
 
 def build_gpu_str(gpus, fan_speed=None):
+    def fan_from_temp(temp):
+        """Compute target fan % from temperature (same curve as thermal guard)."""
+        try:
+            t = float(temp)
+        except (ValueError, TypeError):
+            return "auto"
+        if t <= 65:
+            return "auto"
+        elif t <= 70:
+            return "70%"
+        elif t <= 75:
+            return "85%"
+        else:
+            return "100%"
+
     def fmt(g):
         gpu_name = format_gpu_name(g.get("name", "?"))
         mem_used_mib = g.get("mem_used_mib", 0)
         mem_total_mib = g.get("mem_total_mib", 0)
-        fan = 0
-        if fan_speed and g.get("index") is not None:
-            idx = g.get("index")
-            if isinstance(idx, int) and idx < len(fan_speed):
-                fan = fan_speed[idx]
-            elif isinstance(idx, str) and idx.isdigit() and int(idx) < len(fan_speed):
-                fan = fan_speed[int(idx)]
         temp = g.get("temp_c", 0)
         util = g.get("util_pct", 0)
         power = g.get("power_w", 0)
-        try:
-            fan = f"{float(fan):.0f}%"
-        except (ValueError, TypeError):
-            fan = "0%"
+        fan = fan_from_temp(temp)
         try:
             mem_pct = float(mem_used_mib) / float(mem_total_mib) * 100.0 if mem_total_mib else 0
             mem_pct = f"{mem_pct:.0f}%"
@@ -165,17 +170,19 @@ def build_gpu_str(gpus, fan_speed=None):
             util = f"{float(util):.0f}%"
         except (ValueError, TypeError):
             util = "0%"
+        # Power: round to int, format as "275/360"
         try:
-            power = f"{float(power):.1f}"
+            p = round(float(power))
         except (ValueError, TypeError):
-            power = "0.0"
-        # Append max power limit if available
+            p = 0
         try:
             limit = float(g.get("power_limit_w", 0))
             if limit > 0:
-                power = f"{power} / {limit:.0f}"
+                power = f"{p}/{int(limit)}"
+            else:
+                power = str(p)
         except (ValueError, TypeError):
-            pass
+            power = str(p)
         return (gpu_name, mem_pct, fan, temp, util, power, 1)
 
     if not gpus:
@@ -239,14 +246,14 @@ if SAVE_MODE:
                     }) + "\n")
 
 # --- Table output ---
-hdr = f"{'HOST':<8s} {'UPTIME':>6s}  {'GPU_NAME':<15s} {'FAN':<6s} {'TEMP':<8s} {'MEM':<5s} {'UTIL':<4s} {'POWER':<10s} {'WORKLOAD':<25s}"
+hdr = f"{'HOST':<8s} {'UPTIME':>6s}  {'GPU_NAME':<15s} {'FAN':<6s} {'TEMP':<8s} {'MEM':<5s} {'UTIL':<4s} {'POWER':<8s} {'WORKLOAD':<25s}"
 print(hdr)
 print("-" * len(hdr))
 
 for r in results:
     if "error" in r:
         host = r["host"]
-        print(f"{host:<8s} {'-':>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {'unreachable':<25s}")
+        print(f"{host:<8s} {'-':>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<8s} {'unreachable':<25s}")
         continue
 
     host = r.get("host", "?")
@@ -265,10 +272,10 @@ for r in results:
         else:
             idle_str = host_uptime_str
         if gpu_data is None:
-            print(f"{host:<8s} {idle_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {'idle':<25s}")
+            print(f"{host:<8s} {idle_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<8s} {'idle':<25s}")
         else:
             gpu_name, mem_pct, fan, temp, util, power, _ = gpu_data
-            print(f"{host:<8s} {idle_str:>6s}  {gpu_name:<15s} {fan:<6s}{temp:<8s}{mem_pct:<5s}{util:<4s}{power:<10s} {'idle':<25s}")
+            print(f"{host:<8s} {idle_str:>6s}  {gpu_name:<15s} {fan:<6s}{temp:<8s}{mem_pct:<5s}{util:<4s} {power:<8s} {'idle':<25s}")
         continue
 
     for c in containers:
@@ -283,13 +290,13 @@ for r in results:
 
         gpu_data, gpu_data2 = build_gpu_str(gpus, fan_speed)
         if gpu_data is None:
-            print(f"{host:<8s} {up_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {label:<25s}")
+            print(f"{host:<8s} {up_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<8s} {label:<25s}")
             continue
 
         if gpu_data2 is None:
             g = gpu_data
-            print(f"{host:<8s} {up_str:>6s}  {g[0]:<15s} {g[2]:<6s}{g[3]:<8s}{g[1]:<5s}{g[4]:<4s}{g[5]:<10s} {label:<25s}")
+            print(f"{host:<8s} {up_str:>6s}  {g[0]:<15s} {g[2]:<6s}{g[3]:<8s}{g[1]:<5s}{g[4]:<4s} {g[5]:<8s} {label:<25s}")
         else:
             g1, g2 = gpu_data, gpu_data2
-            print(f"{host:<8s} {up_str:>6s}  {g1[0]:<15s} {g1[2]:<6s}{g1[3]:<8s}{g1[1]:<5s}{g1[4]:<4s}{g1[5]:<10s} {label:<25s}")
+            print(f"{host:<8s} {up_str:>6s}  {g1[0]:<15s} {g1[2]:<6s}{g1[3]:<8s}{g1[1]:<5s}{g1[4]:<4s} {g1[5]:<8s} {label:<25s}")
 PYTHON_SCRIPT
