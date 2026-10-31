@@ -1,7 +1,7 @@
 #!/bin/bash
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
-NODES_FILE="$(cd "$SCRIPT_DIR/.." && pwd -P)/etc/nodes.conf"
+NODES_FILE="$(cd "$SCRIPT_DIR/../operations" && pwd -P)/etc/nodes.conf"
 
 get_plugs() {
     local result
