@@ -162,13 +162,20 @@ def build_gpu_str(gpus, fan_speed=None):
         except (ValueError, TypeError):
             temp = "0.0"
         try:
-            util = f"{float(util):.0f}"
+            util = f"{float(util):.0f}%"
         except (ValueError, TypeError):
-            util = "0"
+            util = "0%"
         try:
             power = f"{float(power):.1f}"
         except (ValueError, TypeError):
             power = "0.0"
+        # Append max power limit if available
+        try:
+            limit = float(g.get("power_limit_w", 0))
+            if limit > 0:
+                power = f"{power} / {limit:.0f}"
+        except (ValueError, TypeError):
+            pass
         return (gpu_name, mem_pct, fan, temp, util, power, 1)
 
     if not gpus:
@@ -251,11 +258,17 @@ for r in results:
 
     if not containers:
         gpu_data, _ = build_gpu_str(gpus, fan_speed)
+        # When idle, show idle duration instead of host uptime
+        idle_s = r.get("idle_s")
+        if idle_s is not None:
+            idle_str = parse_uptime(int(idle_s))
+        else:
+            idle_str = host_uptime_str
         if gpu_data is None:
-            print(f"{host:<8s} {'-':<15s} {host_uptime_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {'idle':<25s}")
+            print(f"{host:<8s} {'-':<15s} {idle_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {'idle':<25s}")
         else:
             gpu_name, mem_pct, fan, temp, util, power, _ = gpu_data
-            print(f"{host:<8s} {'-':<15s} {host_uptime_str:>6s}  {gpu_name:<15s} {fan:<6s}{temp:<8s}{mem_pct:<5s}{util:<4s}{power:<10s} {'idle':<25s}")
+            print(f"{host:<8s} {'-':<15s} {idle_str:>6s}  {gpu_name:<15s} {fan:<6s}{temp:<8s}{mem_pct:<5s}{util:<4s}{power:<10s} {'idle':<25s}")
         continue
 
     for c in containers:
