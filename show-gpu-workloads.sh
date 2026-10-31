@@ -239,14 +239,14 @@ if SAVE_MODE:
                     }) + "\n")
 
 # --- Table output ---
-hdr = f"{'HOST':<8s} {'INSTANCE':<15s} {'UPTIME':>6s}  {'GPU_NAME':<15s} {'FAN':<6s} {'TEMP':<8s} {'MEM':<5s} {'UTIL':<4s} {'POWER':<10s} {'WORKLOAD':<25s}"
+hdr = f"{'HOST':<8s} {'UPTIME':>6s}  {'GPU_NAME':<15s} {'FAN':<6s} {'TEMP':<8s} {'MEM':<5s} {'UTIL':<4s} {'POWER':<10s} {'WORKLOAD':<25s}"
 print(hdr)
 print("-" * len(hdr))
 
 for r in results:
     if "error" in r:
         host = r["host"]
-        print(f"{host:<8s} {'-':<15s} {'-':>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {'unreachable':<25s}")
+        print(f"{host:<8s} {'-':>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {'unreachable':<25s}")
         continue
 
     host = r.get("host", "?")
@@ -265,10 +265,10 @@ for r in results:
         else:
             idle_str = host_uptime_str
         if gpu_data is None:
-            print(f"{host:<8s} {'-':<15s} {idle_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {'idle':<25s}")
+            print(f"{host:<8s} {idle_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {'idle':<25s}")
         else:
             gpu_name, mem_pct, fan, temp, util, power, _ = gpu_data
-            print(f"{host:<8s} {'-':<15s} {idle_str:>6s}  {gpu_name:<15s} {fan:<6s}{temp:<8s}{mem_pct:<5s}{util:<4s}{power:<10s} {'idle':<25s}")
+            print(f"{host:<8s} {idle_str:>6s}  {gpu_name:<15s} {fan:<6s}{temp:<8s}{mem_pct:<5s}{util:<4s}{power:<10s} {'idle':<25s}")
         continue
 
     for c in containers:
@@ -283,13 +283,13 @@ for r in results:
 
         gpu_data, gpu_data2 = build_gpu_str(gpus, fan_speed)
         if gpu_data is None:
-            print(f"{host:<8s} {name:<15s} {up_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {label:<25s}")
+            print(f"{host:<8s} {up_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<10s} {label:<25s}")
             continue
 
         if gpu_data2 is None:
             g = gpu_data
-            print(f"{host:<8s} {name:<15s} {up_str:>6s}  {g[0]:<15s} {g[2]:<6s}{g[3]:<8s}{g[1]:<5s}{g[4]:<4s}{g[5]:<10s} {label:<25s}")
+            print(f"{host:<8s} {up_str:>6s}  {g[0]:<15s} {g[2]:<6s}{g[3]:<8s}{g[1]:<5s}{g[4]:<4s}{g[5]:<10s} {label:<25s}")
         else:
             g1, g2 = gpu_data, gpu_data2
-            print(f"{host:<8s} {name:<15s} {up_str:>6s}  {g1[0]:<15s} {g1[2]:<6s}{g1[3]:<8s}{g1[1]:<5s}{g1[4]:<4s}{g1[5]:<10s} {label:<25s}")
+            print(f"{host:<8s} {up_str:>6s}  {g1[0]:<15s} {g1[2]:<6s}{g1[3]:<8s}{g1[1]:<5s}{g1[4]:<4s}{g1[5]:<10s} {label:<25s}")
 PYTHON_SCRIPT
