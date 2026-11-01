@@ -6,15 +6,28 @@
 #   ./show-gpu-workloads.sh node11 node13    # specific hosts
 #   ./show-gpu-workloads.sh --json           # machine-readable JSON
 #   ./show-gpu-workloads.sh --save           # table + append to JSONL log (for cron)
+#
+# Default host list is read from nodes.csv (column 3 = platform, keep vastai rows).
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+NODES_CSV="${SCRIPT_DIR}/../operations/etc/nodes.csv"
 
 # --- Host list ---
 HOSTS=("${@}")
 if [[ ${#HOSTS[@]} -eq 0 ]]; then
-    HOSTS=(node11 node12 node13 node14 node15 node16 node17 node18 node19)
+    # Read from nodes.csv: keep rows where platform (col 3) == "vastai"
+    HOSTS=()
+    if [[ -f "$NODES_CSV" ]]; then
+        while IFS=',' read -r name type platform id rest; do
+            [[ "$platform" == "vastai" ]] && HOSTS+=("$name")
+        done < <(tail -n +2 "$NODES_CSV")
+    fi
+    if [[ ${#HOSTS[@]} -eq 0 ]]; then
+        # Fallback if nodes.csv missing or no vastai rows
+        HOSTS=(node11 node12 node13 node14 node15 node16 node17 node18 node19)
+    fi
 fi
 
 # --- JSON output mode ---
@@ -24,7 +37,11 @@ if [[ "${1:-}" == "--json" ]]; then
     shift
     HOSTS=("${@}")
     if [[ ${#HOSTS[@]} -eq 0 ]]; then
-        HOSTS=(node11 node12 node13 node14 node15 node16 node17 node18 node19)
+        if [[ -f "$NODES_CSV" ]]; then
+            while IFS=',' read -r name type platform id rest; do
+                [[ "$platform" == "vastai" ]] && HOSTS+=("$name")
+            done < <(tail -n +2 "$NODES_CSV")
+        fi
     fi
 fi
 
@@ -35,8 +52,12 @@ if [[ "${1:-}" == "--save" ]]; then
     shift
     if [[ $# -gt 0 ]]; then
         HOSTS=("$@")
-    else
-        HOSTS=(node11 node12 node13 node14 node15 node16 node17 node18 node19)
+    elif [[ ${#HOSTS[@]} -eq 0 ]]; then
+        if [[ -f "$NODES_CSV" ]]; then
+            while IFS=',' read -r name type platform id rest; do
+                [[ "$platform" == "vastai" ]] && HOSTS+=("$name")
+            done < <(tail -n +2 "$NODES_CSV")
+        fi
     fi
 fi
 
@@ -58,7 +79,7 @@ def ssh_cmd(host, cmd, timeout=15):
     """Run cmd on host via SSH. Returns stdout or None."""
     try:
         r = subprocess.run(
-            ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}",
+            ["ssh", "-o", "BatchMode=yes", "-o", f"ConnectTimeout={timeout}", "-o", "StrictHostKeyChecking=no",
              f"gcox@{host}.cox.lan", cmd],
             capture_output=True, text=True, timeout=timeout
         )
