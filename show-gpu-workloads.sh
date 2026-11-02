@@ -67,7 +67,7 @@ def ssh_cmd(host, cmd, timeout=15):
 
 def fetch_host(host):
     """Fetch latest enriched snapshot from vast-monitor."""
-    snap_raw = ssh_cmd(host, "sudo -n cat /var/log/vast-monitor/latest.json 2>/dev/null || sudo -n tail -1 /var/log/vast-monitor/snapshots.jsonl")
+    snap_raw = ssh_cmd(host, "sudo -n tail -1 /var/log/vast-monitor/snapshots.jsonl")
     if not snap_raw:
         return None
     try:
@@ -75,13 +75,6 @@ def fetch_host(host):
     except json.JSONDecodeError:
         return None
     snap["host"] = host
-    try:
-        stamp = datetime.datetime.fromisoformat(snap["ts"].replace("Z", "+00:00"))
-        age = (datetime.datetime.now(datetime.timezone.utc) - stamp).total_seconds()
-        snap["snapshot_age_s"] = round(age, 1)
-        snap["stale"] = age > max(180, 3 * snap.get("interval_s", 60)) or age < -60
-    except (KeyError, TypeError, ValueError):
-        snap["stale"] = True
     return snap
 
 # ============================================================
@@ -215,7 +208,7 @@ if SAVE_MODE:
                 f.write(json.dumps({
                     "ts": ts, "host": host, "container": None,
                     "label": "no renter container; host/VM workload unclassified", "gpu": gpus,
-                    "snapshot_ts": r.get("ts"), "stale": r.get("stale"), "fan_speed": fan_speed,
+                    "snapshot_ts": r.get("ts"), "fan_speed": fan_speed,
                     "process_summary": {},
                 }) + "\n")
         else:
@@ -230,7 +223,7 @@ if SAVE_MODE:
                     f.write(json.dumps({
                         "ts": ts, "host": host, "container": cname,
                         "label": label, "gpu": gpu_info,
-                        "snapshot_ts": r.get("ts"), "stale": r.get("stale"),
+                        "snapshot_ts": r.get("ts"),
                         "workload_details": c.get("workload_details", {}),
                         "image": c.get("image", ""),
                         "process_summary": proc_summary,
@@ -258,10 +251,6 @@ for r in results:
     containers = [c for c in r.get("containers", []) if c.get("container_type") == "renter"]
     fan_speed = r.get("fan_speed", [])
 
-    if r.get("stale"):
-        print(f"{host:<8s} STALE SNAPSHOT ({r.get('snapshot_age_s', '?')}s old); workload unverified")
-        continue
-
     if not containers:
         gpu_data, _ = build_gpu_str(gpus, fan_speed)
         # When idle, show idle duration instead of host uptime
@@ -287,9 +276,8 @@ for r in results:
 
         label = re.sub(r"[\x00-\x1f\x7f-\x9f]", "?", c.get("workload", "Unknown"))
 
-        uuids = c.get("gpu", {}).get("uuids", [])
-        cards = [g for g in gpus if g.get("uuid") in uuids]
-        # No GPU PID means card ownership cannot be established from this sample.
+        # Preserve the original table's host GPU metrics for every renter row.
+        cards = gpus
         if not cards:
             print(f"{host:<8s} {name:<15s} {up_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<8s} {label:<25s}")
             continue
