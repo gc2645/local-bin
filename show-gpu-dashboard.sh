@@ -44,9 +44,9 @@ vastai --raw show machines | jq -r '
 ' | sort -t$'\t' -k1,1 | {
   # Print header
   printf "%-10s %-8s %-16s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n" \
-    "NAME" "MACHINE" "GPU" "LISTED_HR" "LISTED_DAY" "EARN_HR" "EARN_DAY" "P10_HR" "MED_HR" "MED_DAY"
+    "NAME" "MACHINE" "GPU" "EARN_HR" "EARN_DAY" "LISTED_HR" "LISTED_DAY" "P10_HR" "MED_HR" "MED_DAY"
   printf "%-10s %-8s %-16s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n" \
-    "----" "-------" "---" "---------" "----------" "-------" "--------" "--------" "--------" "--------"
+    "----" "-------" "---" "-------" "--------" "---------" "----------" "--------" "--------" "--------"
 
   # Print each row
   total_listed_hr=0
@@ -65,8 +65,8 @@ vastai --raw show machines | jq -r '
 
     printf "%-10s %-8s %-16s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n" \
       "$name" "$machine" "$gpu" \
-      "$(dollar "$listed")" "$(dollar $(awk "BEGIN{printf \"%.2f\", $listed * 24}"))" \
       "$(dollar "$earn_hr")" "$(dollar "$earn_day")" \
+      "$(dollar "$listed")" "$(dollar $(awk "BEGIN{printf \"%.2f\", $listed * 24}"))" \
       "$p10_total" "$med_total" \
       "$(dollar $(awk "BEGIN{printf \"%.2f\", $med_total * 24}"))"
 
@@ -86,8 +86,8 @@ vastai --raw show machines | jq -r '
   # Totals row
   printf "%-10s %-8s %-16s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n" \
     "" "" "" \
-    "$(dollar "$total_listed_hr")" "$(dollar "$total_listed_day")" \
     "$(dollar "$total_earn_hr")" "$(dollar "$total_earn_day")" \
+    "$(dollar "$total_listed_hr")" "$(dollar "$total_listed_day")" \
     "$total_p10" "$total_med" \
     "$(dollar "$total_med_day")"
 }
