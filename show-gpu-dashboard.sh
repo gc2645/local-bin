@@ -43,17 +43,19 @@ vastai --raw show machines | jq -r '
   | @tsv
 ' | sort -t$'\t' -k1,1 | {
   # Print header
-  printf "%-10s %-8s %-16s %-10s %-10s %-10s %-12s %-12s\n" \
-    "NAME" "MACHINE" "GPU" "LISTED" "EARN_HR" "EARN_DAY" "P10 $/hr" "Med $/hr"
-  printf "%-10s %-8s %-16s %-10s %-10s %-10s %-12s %-12s\n" \
-    "----" "-------" "---" "------" "-------" "--------" "--------" "--------"
+  printf "%-10s %-8s %-16s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n" \
+    "NAME" "MACHINE" "GPU" "LISTED_HR" "LISTED_DAY" "EARN_HR" "EARN_DAY" "P10_HR" "MED_HR" "MED_DAY"
+  printf "%-10s %-8s %-16s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n" \
+    "----" "-------" "---" "---------" "----------" "-------" "--------" "--------" "--------" "--------"
 
   # Print each row
-  total_listed=0
+  total_listed_hr=0
+  total_listed_day=0
   total_earn_hr=0
   total_earn_day=0
   total_p10=0
   total_med=0
+  total_med_day=0
   while IFS=$'\t' read -r name machine gpu ngpu listed earn_hr earn_day; do
     # Look up P10 and Med prices, multiply by num_gpus
     p10="${P10["${gpu}_${ngpu}"]:-0}"
@@ -61,25 +63,31 @@ vastai --raw show machines | jq -r '
     p10_total=$(awk "BEGIN{printf \"%.4f\", $p10 * $ngpu}")
     med_total=$(awk "BEGIN{printf \"%.4f\", $med * $ngpu}")
 
-    printf "%-10s %-8s %-16s %-10s %-10s %-10s %-12s %-12s\n" \
+    printf "%-10s %-8s %-16s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n" \
       "$name" "$machine" "$gpu" \
-      "$(dollar "$listed")" "$(dollar "$earn_hr")" "$(dollar "$earn_day")" \
-      "$p10_total" "$med_total"
+      "$(dollar "$listed")" "$(dollar $(awk "BEGIN{printf \"%.2f\", $listed * 24}"))" \
+      "$(dollar "$earn_hr")" "$(dollar "$earn_day")" \
+      "$p10_total" "$med_total" \
+      "$(dollar $(awk "BEGIN{printf \"%.2f\", $med_total * 24}"))"
 
-    total_listed=$(awk "BEGIN{printf \"%.2f\", $total_listed + $listed}")
+    total_listed_hr=$(awk "BEGIN{printf \"%.2f\", $total_listed_hr + $listed}")
+    total_listed_day=$(awk "BEGIN{printf \"%.2f\", $total_listed_day + $listed * 24}")
     total_earn_hr=$(awk "BEGIN{printf \"%.3f\", $total_earn_hr + $earn_hr}")
     total_earn_day=$(awk "BEGIN{printf \"%.2f\", $total_earn_day + $earn_day}")
     total_p10=$(awk "BEGIN{printf \"%.4f\", $total_p10 + $p10_total}")
     total_med=$(awk "BEGIN{printf \"%.4f\", $total_med + $med_total}")
+    total_med_day=$(awk "BEGIN{printf \"%.2f\", $total_med_day + $med_total * 24}")
   done
 
   # Separator line
-  printf "%-10s %-8s %-16s %-10s %-10s %-10s %-12s %-12s\n" \
-    "" "" "" "---------" "----------" "----------" "------------" "------------"
+  printf "%-10s %-8s %-16s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n" \
+    "" "" "" "------------" "------------" "------------" "------------" "------------" "------------" "------------"
 
   # Totals row
-  printf "%-10s %-8s %-16s %-10s %-10s %-10s %-12s %-12s\n" \
+  printf "%-10s %-8s %-16s %-12s %-12s %-12s %-12s %-12s %-12s %-12s\n" \
     "" "" "" \
-    "$(dollar "$total_listed")" "$(dollar "$total_earn_hr")" "$(dollar "$total_earn_day")" \
-    "$total_p10" "$total_med"
+    "$(dollar "$total_listed_hr")" "$(dollar "$total_listed_day")" \
+    "$(dollar "$total_earn_hr")" "$(dollar "$total_earn_day")" \
+    "$total_p10" "$total_med" \
+    "$(dollar "$total_med_day")"
 }
