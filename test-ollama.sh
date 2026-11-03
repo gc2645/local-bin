@@ -167,6 +167,7 @@ resolve_thinking() {
       THINK_LABEL="$THINK"
     else
       THINK_LABEL="none (unsupported:$THINK)"
+      THINK_SKIP=1
     fi
   elif [[ ",$levels," == *",false,"* ]]; then
     THINK_MODE=false
