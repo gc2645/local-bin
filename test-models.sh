@@ -1104,17 +1104,19 @@ echo "==========================================================================
 echo "$BACKEND benchmark: $(date '+%Y-%m-%d %H:%M:%S %Z') -H $HOST -t $TIMEOUT"
 
 _mlen=$(max_model_len "${SUM_M[@]}")
-printf "%-${_mlen}s %-6s %10s %9s %7s %8s %7s %8s\n" \
-  "MODEL" "RESULT" "MEMORY" "TIME(s)" "PROMPT#" "PROMPT/s" "EVAL#" "EVAL/s"
-table_sep $_mlen 6 10 9 7 8 7 8
+printf "%-${_mlen}s %-6s %10s %9s %9s %7s %8s %7s %8s\n" \
+  "MODEL" "RESULT" "MEMORY" "LOAD(s)" "TIME(s)" "PROMPT#" "PROMPT/s" "EVAL#" "EVAL/s"
+table_sep $_mlen 6 10 9 9 7 8 7 8
 for i in "${!SUM_M[@]}"; do
   if [[ "$BACKEND" == "ollama" ]]; then
     IFS='|' read -r m_total m_load m_pc m_pr m_ec m_er <<< "${SUM_R[$i]}"
-    printf "%-${_mlen}s %-6s %10s %9s %7s %8s %7s %8s\n" \
-      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "$m_total" "$m_pc" "$m_pr" "$m_ec" "$m_er"
+    # TIME(s) = inference only (total - load)
+    m_inference=$(python3 -c "print(f'{max(0, float(${m_total}) - float(${m_load})):.2f}')")
+    printf "%-${_mlen}s %-6s %10s %9s %9s %7s %8s %7s %8s\n" \
+      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "$m_load" "$m_inference" "$m_pc" "$m_pr" "$m_ec" "$m_er"
   else
-    printf "%-${_mlen}s %-6s %10s %9s %7s %8s %7s %8s\n" \
-      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "${LLAMA_TOTAL[$i]:--}" "${LLAMA_PC[$i]:-0}" "${LLAMA_PR[$i]:-0.00}" "${LLAMA_EC[$i]:-0}" "${LLAMA_ER[$i]:-0.00}"
+    printf "%-${_mlen}s %-6s %10s %9s %9s %7s %8s %7s %8s\n" \
+      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "0.00" "${LLAMA_TOTAL[$i]:--}" "${LLAMA_PC[$i]:-0}" "${LLAMA_PR[$i]:-0.00}" "${LLAMA_EC[$i]:-0}" "${LLAMA_ER[$i]:-0.00}"
   fi
 done
 echo "------------------------------------------------------------------------------"
