@@ -1013,7 +1013,7 @@ pass=0; fail=0; skip=0; failed=()
 total_sum=0.00; erate_sum=0.00; erate_n=0
 SUM_M=(); SUM_S=(); SUM_R=(); SUM_SZ=()
 # Per-model metrics for llama.cpp (ollama uses SUM_R)
-LLAMA_PC=(); LLAMA_EC=(); LLAMA_ER=(); LLAMA_TOTAL=()
+LLAMA_PC=(); LLAMA_EC=(); LLAMA_ER=(); LLAMA_TOTAL=(); LLAMA_PR=()
 
 for m in "${MODELS[@]}"; do
   echo
@@ -1084,6 +1084,7 @@ except Exception:
     LLAMA_EC+=("$m_ec")
     LLAMA_ER+=("$m_er")
     LLAMA_TOTAL+=("$m_total")
+    LLAMA_PR+=("$m_pr")
     SUM_SZ+=("$MEM_HUMAN")
     echo "--- $m: $status (${elapsed}s)${reason:+ - $reason} [mem: $MEM_HUMAN]"
   fi
@@ -1103,17 +1104,17 @@ echo "==========================================================================
 echo "$BACKEND benchmark: $(date '+%Y-%m-%d %H:%M:%S %Z') -H $HOST -t $TIMEOUT"
 
 _mlen=$(max_model_len "${SUM_M[@]}")
-printf "%-${_mlen}s %-6s %10s %9s %7s %8s %7s\n" \
-  "MODEL" "RESULT" "MEMORY" "TOTAL(s)" "PROMPT#" "EVAL#" "tok/s"
-table_sep $_mlen 6 10 9 7 8 7
+printf "%-${_mlen}s %-6s %10s %9s %7s %8s %7s %8s\n" \
+  "MODEL" "RESULT" "MEMORY" "TIME(s)" "PROMPT#" "PROMPT/s" "EVAL#" "EVAL/s"
+table_sep $_mlen 6 10 9 7 8 7 8
 for i in "${!SUM_M[@]}"; do
   if [[ "$BACKEND" == "ollama" ]]; then
     IFS='|' read -r m_total m_load m_pc m_pr m_ec m_er <<< "${SUM_R[$i]}"
-    printf "%-${_mlen}s %-6s %10s %9s %7s %8s %7s\n" \
-      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "$m_total" "$m_pc" "$m_ec" "$m_er"
+    printf "%-${_mlen}s %-6s %10s %9s %7s %8s %7s %8s\n" \
+      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "$m_total" "$m_pc" "$m_pr" "$m_ec" "$m_er"
   else
-    printf "%-${_mlen}s %-6s %10s %-9s %7s %8s %7s\n" \
-      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "${LLAMA_TOTAL[$i]:--}" "${LLAMA_PC[$i]:-0}" "${LLAMA_EC[$i]:-0}" "${LLAMA_ER[$i]:-0.00}"
+    printf "%-${_mlen}s %-6s %10s %9s %7s %8s %7s %8s\n" \
+      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "${LLAMA_TOTAL[$i]:--}" "${LLAMA_PC[$i]:-0}" "${LLAMA_PR[$i]:-0.00}" "${LLAMA_EC[$i]:-0}" "${LLAMA_ER[$i]:-0.00}"
   fi
 done
 echo "------------------------------------------------------------------------------"
