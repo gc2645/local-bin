@@ -99,50 +99,75 @@ curl -sf -o /dev/null --max-time 5 "http://$HOST/v1/models" || die "cannot reach
 # ------------------------------------------------------------------
 
 get_gpu_mem() {
-    local bytes=""
-    if command -v nvidia-smi >/dev/null 2>&1; then
-        bytes=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | python3 -c "
-import sys
-total = 0.0
-n = 0
-for line in sys.stdin:
-    line = line.strip()
-    if line:
-        total += float(line) * 1048576
-        n += 1
-if not n:
-    raise SystemExit(1)
-print(int(total))
-" 2>/dev/null || true)
+    # Query /v1/models to find the currently loaded model's port,
+    # then measure that child process's RSS (not the router's).
+    local model_info
+    model_info=$(curl -s --max-time 5 "http://$HOST/v1/models" 2>/dev/null)
+    if [ -z "$model_info" ]; then
+        echo "0"
+        return
     fi
-    # macOS: measure llama-server process RSS via ps
-    if [ -z "$bytes" ] && command -v ps >/dev/null 2>&1; then
-        # Try to find the llama-server process listening on the target port
-        local port="${HOST##*:}"
-        bytes=$(ps -o rss= -p "$(lsof -i :"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)" 2>/dev/null | tr -d ' ' || true)
-        if [ -n "$bytes" ] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
-            # RSS is in KB, convert to bytes
-            bytes=$((bytes * 1024))
-        else
-            bytes="0"
-        fi
+    local port
+    port=$(echo "$model_info" | jq -r '
+        .data[] |
+        select(.status.value == "loaded") |
+        .status.args as $a |
+        [range($a | length) | select($a[.] == "--port") | $a[. + 1]] |
+        first // empty
+    ' 2>/dev/null || echo "")
+    if [ -z "$port" ]; then
+        echo "0"
+        return
     fi
-    # Fallback to /metrics if nvidia-smi is not available or returns nothing
-    if [ -z "$bytes" ] || [ "$bytes" = "0" ]; then
-        bytes=$(curl -s --max-time 5 "http://$HOST/metrics" 2>/dev/null | python3 -c "
-import sys
-total = 0.0
-n = 0
-for line in sys.stdin:
-    if 'llamaswap_gpu_memory_used_bytes{' in line:
-        total += float(line.strip().split()[-1])
-        n += 1
-if not n:
-    raise SystemExit(1)
-print(int(total))
-" 2>/dev/null || true)
+    local pid
+    pid=$(lsof -i :"$port" -sTCP:LISTEN -t 2>/dev/null | head -1) || true
+    if [ -z "$pid" ]; then
+        echo "0"
+        return
     fi
-    echo "${bytes:-0}"
+    local rss
+    rss=$(ps -o rss= -p "$pid" 2>/dev/null | tr -d ' ')
+    if [ -z "$rss" ] || ! [[ "$rss" =~ ^[0-9]+$ ]]; then
+        echo "0"
+        return
+    fi
+    # RSS in KB → bytes
+    echo $((rss * 1024))
+}
+
+unload_model() {
+    # Find the loaded model's child process and kill it.
+    local model_info
+    model_info=$(curl -s --max-time 5 "http://$HOST/v1/models" 2>/dev/null)
+    if [ -z "$model_info" ]; then
+        return
+    fi
+    local port
+    port=$(echo "$model_info" | jq -r '
+        .data[] |
+        select(.status.value == "loaded") |
+        .status.args as $a |
+        [range($a | length) | select($a[.] == "--port") | $a[. + 1]] |
+        first // empty
+    ' 2>/dev/null || echo "")
+    if [ -z "$port" ]; then
+        return
+    fi
+    local pid
+    pid=$(lsof -i :"$port" -sTCP:LISTEN -t 2>/dev/null | head -1) || true
+    if [ -z "$pid" ]; then
+        return
+    fi
+    kill "$pid" 2>/dev/null || true
+    local retries=10
+    while [ $retries -gt 0 ] && kill -0 "$pid" 2>/dev/null; do
+        sleep 0.5
+        retries=$((retries - 1))
+    done
+    if kill -0 "$pid" 2>/dev/null; then
+        kill -9 "$pid" 2>/dev/null || true
+        sleep 1
+    fi
 }
 
 bytes_to_human() {
@@ -208,10 +233,21 @@ echo
 echo "Starting benchmark for ${#MODELS[@]} model(s) on http://$HOST"
 echo "============================================================"
 
+# Ensure nothing is loaded before starting
+info "Ensuring no models are loaded before starting..."
+unload_model
+sleep 1
+
 for m in "${MODELS[@]}"; do
+    # Safety: ensure no leftover model before each test
+    if [[ "$KEEP_LOADED" -eq 0 ]]; then
+        unload_model
+        sleep 1
+    fi
+
     echo "Testing model: $m"
 
-    # 1. Measure memory before
+    # 1. Measure memory before (should be 0 if unload worked)
     MEM_BEFORE=$(get_gpu_mem)
     
     # 2. Trigger load (send a tiny prompt)
@@ -293,15 +329,18 @@ print(f'{prompt_tokens}|{completion_tokens}|{p_tps:.2f}|{e_tps:.2f}')
     echo "  Result: $m | Memory: $MEM_HUMAN | Time: ${ELAPSED_SEC}s | Eval: ${e_tps} t/s"
     echo "$m|$MEM_HUMAN|$p_tps|$e_tps|$ELAPSED_SEC" >> "$RESULTS_FILE"
 
-    # 7. Cleanup (only if NOT keeping loaded)
+    # 7. Cleanup - kill model child process (only if NOT keeping loaded)
     if [[ "$KEEP_LOADED" -eq 0 ]]; then
-        # In a router setup, we can't easily "unload" one model. 
-        # We just wait for the next one to load.
-        # If we wanted to be aggressive, we could restart the service, 
-        # but that's too much for a benchmark.
-        sleep 1
+        info "Unloading $m..."
+        unload_model
     fi
 done
+
+# Unload model after last test (only if NOT keeping loaded)
+if [[ "$KEEP_LOADED" -eq 0 ]]; then
+    info "Unloading final model..."
+    unload_model
+fi
 
 # ------------------------------------------------------------------
 # Final Report
