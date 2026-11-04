@@ -324,18 +324,15 @@ ensure_idle() {
 get_gpu_mem() {
   case "$BACKEND" in
     ollama)
-      # Ollama: use 'ollama ps' to get model size
-      local size
-      size=$(ollama ps 2>/dev/null | awk 'NR > 1 && NF {print $3; exit}')
-      if [[ -n "$size" && "$size" != "-" ]]; then
-        case "$size" in
-          *GB) echo "${size%GB}" | awk '{printf "%d", $1 * 1073741824}' ;;
-          *MB) echo "${size%MB}" | awk '{printf "%d", $1 * 1048576}' ;;
-          *) echo "0" ;;
-        esac
-      else
-        echo "0"
-      fi
+      # Ollama: use 'ollama ps' — SIZE is $3, unit is $4 (GB/MB/KB)
+      ollama ps 2>/dev/null | awk 'NR > 1 && NF {
+        val = $3; unit = $4
+        if (unit == "GB") printf "%d", val * 1073741824
+        else if (unit == "MB") printf "%d", val * 1048576
+        else if (unit == "KB") printf "%d", val * 1024
+        else printf "%d", val
+        exit
+      }' || echo "0"
       ;;
     llama)
       # llama.cpp: measure the model child process's RSS
@@ -403,39 +400,29 @@ parse_metrics() {
   local logfile="$1"
   case "$BACKEND" in
     ollama)
-      # Ollama CLI metrics block: total duration, load duration, prompt eval count/rate, eval count/rate
-      local total load pc pr ec er
-      total=$(awk '/^total duration:/ {
-        val=$3; gsub(/[^0-9.]/,"",val)
-        if ($3~/ms/) printf "%.2f",val/1000
-        else if ($3~/ns/) printf "%.2f",val/1e9
-        else printf "%.2f",val+0
-      }' "$logfile")
-      load=$(awk '/^load duration:/ {
-        val=$3; gsub(/[^0-9.]/,"",val)
-        if ($3~/ms/) printf "%.2f",val/1000
-        else if ($3~/ns/) printf "%.2f",val/1e9
-        else printf "%.2f",val+0
-      }' "$logfile")
-      pc=$(awk '/prompt eval count:/ || /prompt count:/ {
-        for(i=1;i<=NF;i++) if($i~/^[0-9]+$/){print $i;break}
-      }' "$logfile")
-      ec=$(awk '/^eval count:/ {
-        for(i=1;i<=NF;i++) if($i~/^[0-9]+$/){print $i;break}
-      }' "$logfile")
-      pr=$(awk '/prompt eval rate:/ || /prompt rate:/ {
-        for(i=1;i<=NF;i++) if($i~/^[0-9]/){gsub(/[^0-9.]/,"",$i);print $i;break}
-      }' "$logfile")
-      er=$(awk '/^eval rate:/ {
-        for(i=1;i<=NF;i++) if($i~/^[0-9]/){gsub(/[^0-9.]/,"",$i);print $i;break}
-      }' "$logfile")
-      echo "${total:--}|${load:--}|${pc:--}|${pr:--}|${ec:--}|${er:--}"
+       # Ollama /api/chat returns flat fields (all durations in nanoseconds)
+       python3 -c "
+import json, sys
+with open(sys.argv[1]) as f:
+    d = json.load(f)
+ec = d.get('eval_count', 0)
+pc = d.get('prompt_eval_count', 0)
+total_ns = d.get('total_duration', 0)
+load_ns = d.get('load_duration', 0)
+pev_ns = d.get('prompt_eval_duration', 0)
+ev_ns = d.get('eval_duration', 0)
+total = total_ns / 1e9 if total_ns else 0
+load = load_ns / 1e9 if load_ns else 0
+ptps = pc / (pev_ns / 1e9) if pev_ns and pev_ns > 0 else 0
+etps = ec / (ev_ns / 1e9) if ev_ns and ev_ns > 0 else 0
+print(f'{total:.2f}|{load:.2f}|{pc}|{ptps:.2f}|{ec}|{etps:.2f}')
+" "$logfile" 2>/dev/null || echo "-|-|0|-|0|-"
       ;;
     llama)
       # llama.cpp: parse from /v1/chat/completions JSON response
       python3 -c "
 import json, sys
-with open('$logfile') as f:
+with open(sys.argv[1]) as f:
     d = json.load(f)
 u = d.get('usage', {})
 t = d.get('timings', {})
@@ -446,7 +433,7 @@ etps = t.get('predicted_per_second', 0)
 total = t.get('total', 0)
 load = t.get('prompt_n', 0)  # fallback
 print(f'{total:.2f}|{load:.2f}|{pt}|{ptps:.2f}|{ct}|{etps:.2f}')
-" 2>/dev/null || echo "0.00|0.00|0|0.00|0|0.00"
+" "$logfile" 2>/dev/null || echo "0.00|0.00|0|0.00|0|0.00"
       ;;
   esac
 }
@@ -535,7 +522,11 @@ evaluate_tool_test() {
   local test_name="$1" outfile="$2"
   local tc_len result
 
-  tc_len=$(jq '.choices[0].message.tool_calls | if type == "array" then length else 0 end' "$outfile" 2>/dev/null)
+  # Normalize jq path: ollama uses .message, llama uses .choices[0].message
+  local mp='.choices[0].message'
+  [[ "$BACKEND" == "ollama" ]] && mp='.message'
+
+  tc_len=$(jq "$mp.tool_calls | if type == \"array\" then length else 0 end" "$outfile" 2>/dev/null)
   [[ -z "$tc_len" ]] && tc_len=0
 
   if [[ "$tc_len" -gt 0 ]]; then
@@ -551,8 +542,8 @@ evaluate_tool_test() {
       [[ "$result" == "UNSUPPORTED" ]] && { echo "UNSUPPORTED"; return; }
       [[ "$result" != "HAS_TOOLS" ]] && { echo "FAIL"; return; }
       local func_name args
-      func_name=$(jq -r '.choices[0].message.tool_calls[0].function.name // ""' "$outfile" 2>/dev/null)
-      args=$(jq -r '.choices[0].message.tool_calls[0].function.arguments // ""' "$outfile" 2>/dev/null)
+      func_name=$(jq -r "$mp.tool_calls[0].function.name // \"\"" "$outfile" 2>/dev/null)
+      args=$(jq -r "$mp.tool_calls[0].function.arguments // \"\"" "$outfile" 2>/dev/null)
       if [[ "$func_name" == "get_host_status" ]] && \
          echo "$args" | grep -q '"hostname"' && \
          echo "$args" | grep -q 'node20'; then
@@ -565,8 +556,8 @@ evaluate_tool_test() {
       [[ "$result" == "UNSUPPORTED" ]] && { echo "UNSUPPORTED"; return; }
       [[ "$result" != "HAS_TOOLS" ]] && { echo "FAIL"; return; }
       local func_names arg_str
-      func_names=$(jq -r '.choices[0].message.tool_calls[].function.name' "$outfile" 2>/dev/null)
-      arg_str=$(jq -r '.choices[0].message.tool_calls[].function.arguments' "$outfile" 2>/dev/null)
+      func_names=$(jq -r "$mp.tool_calls[].function.name" "$outfile" 2>/dev/null)
+      arg_str=$(jq -r "$mp.tool_calls[].function.arguments" "$outfile" 2>/dev/null)
       if echo "$func_names" | grep -q 'get_gpu_status' && \
          echo "$arg_str" | grep -q '"hostname"' && \
          echo "$arg_str" | grep -q 'node14' && \
@@ -580,7 +571,7 @@ evaluate_tool_test() {
       [[ "$result" == "UNSUPPORTED" ]] && { echo "UNSUPPORTED"; return; }
       [[ "$result" == "HAS_TOOLS" ]] && { echo "FAIL"; return; }
       local response_text
-      response_text=$(jq -r '.choices[0].message.content // ""' "$outfile" 2>/dev/null)
+      response_text=$(jq -r "$mp.content // \"\"" "$outfile" 2>/dev/null)
       if echo "$response_text" | grep -qi "graphics processing unit"; then
         echo "PASS"
       else
@@ -1022,7 +1013,7 @@ pass=0; fail=0; skip=0; failed=()
 total_sum=0.00; erate_sum=0.00; erate_n=0
 SUM_M=(); SUM_S=(); SUM_R=(); SUM_SZ=()
 # Per-model metrics for llama.cpp (ollama uses SUM_R)
-LLAMA_PC=(); LLAMA_EC=(); LLAMA_ER=()
+LLAMA_PC=(); LLAMA_EC=(); LLAMA_ER=(); LLAMA_TOTAL=()
 
 for m in "${MODELS[@]}"; do
   echo
@@ -1082,14 +1073,17 @@ try:
     ct = u.get('completion_tokens', 0)
     ptbs = t.get('prompt_per_second', 0)
     etps = t.get('predicted_per_second', 0)
-    print(f'{pt}|{ct}|{ptbs:.2f}|{etps:.2f}')
+    total_ms = t.get('prompt_ms', 0) + t.get('predicted_ms', 0)
+    total_s = total_ms / 1000.0
+    print(f'{pt}|{ct}|{ptbs:.2f}|{etps:.2f}|{total_s:.2f}')
 except Exception:
-    print('0|0|0.00|0.00')
-" "$runlog" 2>/dev/null || echo "0|0|0.00|0.00")
-    IFS='|' read -r m_pc m_ec m_pr m_er <<< "$llama_metrics"
+    print('0|0|0.00|0.00|0.00')
+" "$runlog" 2>/dev/null || echo "0|0|0.00|0.00|0.00")
+    IFS='|' read -r m_pc m_ec m_pr m_er m_total <<< "$llama_metrics"
     LLAMA_PC+=("$m_pc")
     LLAMA_EC+=("$m_ec")
     LLAMA_ER+=("$m_er")
+    LLAMA_TOTAL+=("$m_total")
     SUM_SZ+=("$MEM_HUMAN")
     echo "--- $m: $status (${elapsed}s)${reason:+ - $reason} [mem: $MEM_HUMAN]"
   fi
@@ -1119,7 +1113,7 @@ for i in "${!SUM_M[@]}"; do
       "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "$m_total" "$m_pc" "$m_ec" "$m_er"
   else
     printf "%-${_mlen}s %-6s %10s %-9s %7s %8s %7s\n" \
-      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "-" "${LLAMA_PC[$i]:-0}" "${LLAMA_EC[$i]:-0}" "${LLAMA_ER[$i]:-0.00}"
+      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "${LLAMA_TOTAL[$i]:--}" "${LLAMA_PC[$i]:-0}" "${LLAMA_EC[$i]:-0}" "${LLAMA_ER[$i]:-0.00}"
   fi
 done
 echo "------------------------------------------------------------------------------"
