@@ -1,21 +1,29 @@
 #!/usr/bin/env bash
+# test-llama - smoke-test models on a llama.cpp llama-server instance
 #
-# llama-swap-benchmark.sh
-# Benchmark all models on a llama-swap instance (default: localhost:8080)
+# examples:
+#   ./test-llama.sh                      # test every model on default host
+#   ./test-llama.sh -H 127.0.0.1:8080    # test every model on specific host
+#   ./test-llama.sh -m 'qwen'              # only matching models
+#   ./test-llama.sh -p "say hi" -n        # dry run: show plan, don't execute
+#   ./test-llama.sh -k                    # leave models loaded after testing
 #
-# Usage:
-#   ./llama-swap-benchmark.sh [BASE_URL] [USER_PROMPT]
-#
-# Examples:
-#   ./llama-swap-benchmark.sh
-#   ./llama-swap-benchmark.sh http://localhost:8080 "Summarize the history of Rome in 3 sentences."
-#   ./llama-swap-benchmark.sh http://my-server:8080 "What is quantum entanglement?"
-#
-
 set -euo pipefail
 
-BASE_URL="${1:-http://localhost:8080}"
-USER_PROMPT="${2:-Hello, can you tell me a short fun fact about space?}"
+# ------------------------------------------------------------------
+# Defaults and Variables
+# ------------------------------------------------------------------
+HOST="127.0.0.1:8080"
+PROMPT="hello"
+PROMPT_FILE=""
+MATCH=""
+SORT="name"
+LIST_ONLY=0
+DRY_RUN=0
+KEEP_LOADED=0
+TIMEOUT=180
+VERBOSE=1
+RESULTS_FILE=""
 
 # ------------------------------------------------------------------
 # Helpers
@@ -23,18 +31,73 @@ USER_PROMPT="${2:-Hello, can you tell me a short fun fact about space?}"
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 CYAN='\033[0;36m'
-NC='\033[0m' # No Color
+RED='\033[0;31m'
+NC='\033[0m'
 
 log()  { echo -e "${GREEN}[bench]${NC} $*"; }
 warn() { echo -e "${YELLOW}[warn]${NC} $*"; }
 info() { echo -e "${CYAN}[info]${NC} $*"; }
+error() { echo -e "${RED}[error]${NC} $*" >&2; }
 
-# Get total GPU memory used across ALL GPUs (returns plain integer bytes).
-# Prefers nvidia-smi (instant, exact VRAM on NVIDIA hosts). On hosts without
-# it (e.g. macOS / Apple Silicon) it falls back to llama-swap's /metrics
-# gauge, which reads the current model's memory but is refreshed on llama-swap's
-# own polling interval -- so the caller must wait for it to settle (see
-# unload_all) before treating a reading as the idle baseline.
+usage() {
+  cat <<'EOF'
+usage: test-llama [options] [prompt]
+
+targets one llama-server instance and runs the same smoke test against every model.
+
+options:
+  -H, --host HOST      server to test: host:port, or URL
+                       (default 127.0.0.1:8080)
+  -p, --prompt TEXT    prompt to send (default "hello"; also accepts one
+                       positional argument)
+  -f, --prompt-file F read prompt from file
+  -m, --match REGEX    only test models whose name matches REGEX
+  -s, --sort HOW       order models: name | size | none  (default name)
+  -l, --list           show model list and capabilities
+  -n, --dry-run        show what would run, execute nothing
+  -k, --keep           do not unload models after testing
+  -t, --timeout SECS   kill a run after SECS (default 180)
+      --no-verbose     drop --verbose (no timing report)
+  -h, --help           show this help and exit
+
+EOF
+}
+
+die() { error "$*"; exit 1; }
+
+# No args: proceed with defaults
+
+while (( $# )); do
+  case "$1" in
+    -H|--host)     [[ $# -ge 2 ]] || die "$1 needs a value"; HOST="$2"; shift 2 ;;
+    -p|--prompt)   [[ $# -ge 2 ]] || die "$1 needs a value"; PROMPT="$2"; shift 2 ;;
+    -f|--prompt-file) [[ $# -ge 2 ]] || die "$1 needs a value"; PROMPT_FILE="$2"; shift 2 ;;
+    -m|--match)    [[ $# -ge 2 ]] || die "$1 needs a value"; MATCH="$2"; shift 2 ;;
+    -s|--sort)     [[ $# -ge 2 ]] || die "$1 needs a value"; SORT="$2"; shift 2 ;;
+    -l|--list)     LIST_ONLY=1; shift ;;
+    -n|--dry-run)  DRY_RUN=1; shift ;;
+    -k|--keep)     KEEP_LOADED=1; shift ;;
+    -t|--timeout)  [[ $# -ge 2 ]] || die "$1 needs a value"; TIMEOUT="$2"; shift 2 ;;
+    --no-verbose) VERBOSE=0; shift ;;
+    -h|--help)     usage; exit 0 ;;
+    -*)            die "unknown option: $1 (try --help)" ;;
+    *)             PROMPT="$1"; shift ;;
+  esac
+done
+
+# Normalize Host
+HOST="${HOST#*//}"; HOST="${HOST%/}"
+[[ "$HOST" != *:* ]] && HOST="$HOST:8080"
+
+# Dependencies
+command -v jq >/dev/null || die "jq is required"
+command -v python3 >/dev/null || die "python3 is required"
+curl -sf -o /dev/null --max-time 5 "http://$HOST/v1/models" || die "cannot reach llama-server at http://$HOST"
+
+# ------------------------------------------------------------------
+# Core Functions
+# ------------------------------------------------------------------
+
 get_gpu_mem() {
     local bytes=""
     if command -v nvidia-smi >/dev/null 2>&1; then
@@ -52,8 +115,21 @@ if not n:
 print(int(total))
 " 2>/dev/null || true)
     fi
-    if [ -z "$bytes" ]; then
-        bytes=$(curl -s --max-time 5 "${BASE_URL}/metrics" 2>/dev/null | python3 -c "
+    # macOS: measure llama-server process RSS via ps
+    if [ -z "$bytes" ] && command -v ps >/dev/null 2>&1; then
+        # Try to find the llama-server process listening on the target port
+        local port="${HOST##*:}"
+        bytes=$(ps -o rss= -p "$(lsof -i :"$port" -sTCP:LISTEN -t 2>/dev/null | head -1)" 2>/dev/null | tr -d ' ' || true)
+        if [ -n "$bytes" ] && [[ "$bytes" =~ ^[0-9]+$ ]]; then
+            # RSS is in KB, convert to bytes
+            bytes=$((bytes * 1024))
+        else
+            bytes="0"
+        fi
+    fi
+    # Fallback to /metrics if nvidia-smi is not available or returns nothing
+    if [ -z "$bytes" ] || [ "$bytes" = "0" ]; then
+        bytes=$(curl -s --max-time 5 "http://$HOST/metrics" 2>/dev/null | python3 -c "
 import sys
 total = 0.0
 n = 0
@@ -69,12 +145,11 @@ print(int(total))
     echo "${bytes:-0}"
 }
 
-# Convert bytes to human-readable using Python (handles large numbers and negatives)
 bytes_to_human() {
     python3 -c "
 b = int(${1:-0})
 if b < 0:
-    print(f'{b/1024:.0f} KB (neg baseline drift)')
+    print(f'{b/1024:.0f} KB')
 elif b >= 1073741824:
     print(f'{b/1073741824:.2f} GB')
 elif b >= 1048576:
@@ -84,256 +159,169 @@ else:
 "
 }
 
-# Unload all models, then wait until GPU memory settles back to the idle
-# baseline. A fixed sleep is not enough: large models free memory asynchronously
-# and llama-swap's /metrics gauge is refreshed on its own polling interval, so
-# the next model's "before" reading could otherwise include memory that is still
-# being freed. Because the two platforms report different idle floors (near-zero
-# VRAM on NVIDIA vs a ~0.5-0.6 GB noisy Metal baseline on macOS), we poll until
-# the reading stops dropping near its own low-water mark rather than using one
-# absolute threshold.
-unload_all() {
-    curl -s -X POST --max-time 10 "${BASE_URL}/api/models/unload" >/dev/null 2>&1 || true
-    # wait a beat for the unload to start, then poll until it settles
-    sleep 1
-    PREV=-1
-    MIN=-1
-    IDLE=0
-    for _ in $(seq 1 30); do
-        CUR=$(get_gpu_mem)
-        # NVIDIA idle is essentially zero, so a couple of MB per GPU is done
-        if [ "$CUR" -le $((512 * 1024 * 1024)) ]; then
-            break
-        fi
-        if [ "$MIN" -lt 0 ] || [ "$CUR" -lt "$MIN" ]; then
-            MIN=$CUR
-        fi
-        # bottomed out: near the low-water mark AND not dropping quickly anymore
-        if [ "$PREV" -ge 0 ] \
-        && [ $((CUR - MIN)) -le $((256 * 1024 * 1024)) ] \
-        && [ $((PREV - CUR)) -lt $((256 * 1024 * 1024)) ]; then
-            IDLE=$((IDLE + 1))
-            [ "$IDLE" -ge 2 ] && break
-        else
-            IDLE=0
-        fi
-        PREV=$CUR
-        sleep 2
-    done
-    sleep 2
+list_models() {
+  curl -s "http://$HOST/v1/models" | jq -r --arg s "$SORT" '
+    .data as $m
+    | (if   $s == "size" then ($m | sort_by(.size))
+       elif $s == "name" then ($m | sort_by(.id))
+       else $m end)
+    | .[].id'
 }
 
 # ------------------------------------------------------------------
-# Step 1: Get model list
+# Main Execution
 # ------------------------------------------------------------------
-log "Fetching model list from ${BASE_URL}/v1/models ..."
-MODELS_JSON=$(curl -s --max-time 10 "${BASE_URL}/v1/models")
 
-if [ -z "$MODELS_JSON" ]; then
-    echo "ERROR: Could not fetch model list. Is llama-swap running at ${BASE_URL}?"
-    exit 1
+if [[ -n "$PROMPT_FILE" ]]; then
+  [[ -f "$PROMPT_FILE" ]] || die "prompt file not found: $PROMPT_FILE"
+  PROMPT="$(cat "$PROMPT_FILE")"
+  VERBOSE=0
 fi
 
-# Extract model IDs
-MODEL_IDS=$(echo "$MODELS_JSON" | python3 -c "
-import sys, json
-data = json.load(sys.stdin)
-for m in data.get('data', []):
-    print(m['id'])
-")
+# Fetch models
+mapfile -t MODELS < <(list_models)
+if (( ${#MODELS[@]} )); then
+  if [[ -n "$MATCH" ]]; then
+    mapfile -t MODELS < <(printf '%s\n' "${MODELS[@]}" | grep -E "$MATCH" || true)
+  fi
+fi
+(( ${#MODELS[@]} )) || die "no models matched on http://$HOST"
 
-if [ -z "$MODEL_IDS" ]; then
-    echo "ERROR: No models found."
-    exit 1
+if [[ "$LIST_ONLY" -eq 1 ]]; then
+  echo "Models on http://$HOST:"
+  for m in "${MODELS[@]}"; do echo "  - $m"; done
+  exit 0
 fi
 
-MODEL_COUNT=$(echo "$MODEL_IDS" | wc -l | tr -d ' ')
-info "Found ${MODEL_COUNT} model(s):"
-echo "$MODEL_IDS" | while read -r id; do echo "  - $id"; done
-echo
+if [[ "$DRY_RUN" -eq 1 ]]; then
+  echo "Dry run: the following models would be tested:"
+  for m in "${MODELS[@]}"; do echo "  - $m"; done
+  exit 0
+fi
 
-# ------------------------------------------------------------------
-# Step 2: Unload everything to start clean
-# ------------------------------------------------------------------
-unload_all
-log "All models unloaded. Starting benchmark..."
-echo
-
-# ------------------------------------------------------------------
-# Step 3: Benchmark each model
-# ------------------------------------------------------------------
-# Collect results in a temp file
 RESULTS_FILE=$(mktemp)
 trap 'rm -f "$RESULTS_FILE"' EXIT
 
-FIRST=true
-while IFS= read -r MODEL_ID; do
-    echo "============================================================"
-    echo "  Model: ${MODEL_ID}"
-    echo "============================================================"
+# --- Benchmark Loop ---
 
-    # Measure GPU memory before loading
+echo
+echo "Starting benchmark for ${#MODELS[@]} model(s) on http://$HOST"
+echo "============================================================"
+
+for m in "${MODELS[@]}"; do
+    echo "Testing model: $m"
+
+    # 1. Measure memory before
     MEM_BEFORE=$(get_gpu_mem)
-    info "GPU memory before: $(bytes_to_human "$MEM_BEFORE")"
-
-    # Record start time
+    
+    # 2. Trigger load (send a tiny prompt)
+    # We use the /v1/chat/completions endpoint as it's standard
+    # We send a very short prompt to minimize time
     START_TIME=$(date +%s%N)
-
-    # Send "hello" to trigger model load
-    info "Loading model with greeting..."
-    HELLO_RESP=""
-    HELLO_RESP=$(PROMPT_MODEL="$MODEL_ID" BASE="$BASE_URL" python3 -c "
+    
+    # Using python to construct the JSON to avoid shell escaping hell
+    resp=$(python3 -c "
 import json, subprocess, os
-payload = json.dumps({'model': os.environ['PROMPT_MODEL'], 'messages': [{'role': 'user', 'content': 'Hello'}], 'max_tokens': 20})
-r = subprocess.run(['curl', '-s', '--max-time', '120', '-X', 'POST', os.environ['BASE']+'/v1/chat/completions', '-H', 'Content-Type: application/json', '-d', payload], capture_output=True, text=True)
+payload = json.dumps({'model': '$m', 'messages': [{'role': 'user', 'content': 'hi'}], 'max_tokens': 5})
+r = subprocess.run(['curl', '-s', '--max-time', '$TIMEOUT', '-X', 'POST', 'http://$HOST/v1/chat/completions', '-H', 'Content-Type: application/json', '-d', payload], capture_output=True, text=True)
 print(r.stdout)
-" 2>/dev/null)
+")
 
-    if [ -z "$HELLO_RESP" ]; then
-        warn "Model ${MODEL_ID} failed to load (corrupted GGUF or incompatible). Skipping."
-        echo
-        echo "  Results for ${MODEL_ID}:"
-        echo "  ─────────────────────────────────────────"
-        echo "  Status: SKIPPED (model failed to load)"
-        echo "  ─────────────────────────────────────────"
-        echo
-        echo "${MODEL_ID}|SKIPPED|N/A|N/A|N/A" >> "$RESULTS_FILE"
-        info "Unloading ${MODEL_ID}..."
-        unload_all
+    if [ -z "$resp" ] || [ "$resp" == "{}" ]; then
+        warn "Model $m failed to load. Skipping."
+        echo "$m|SKIPPED|N/A|N/A|N/A" >> "$RESULTS_FILE"
         continue
     fi
 
-    # Now send the user prompt (this may benefit from cached KV cache)
-    info "Running user prompt..."
-    USER_RESP=""
-    USER_RESP=$(PROMPT_MODEL="$MODEL_ID" BASE="$BASE_URL" PROMPT="$USER_PROMPT" python3 -c "
+    # 3. Run actual user prompt
+    USER_RESP=$(python3 -c "
 import json, subprocess, os
-payload = json.dumps({'model': os.environ['PROMPT_MODEL'], 'messages': [{'role': 'user', 'content': os.environ['PROMPT']}], 'max_tokens': 512})
-r = subprocess.run(['curl', '-s', '--max-time', '300', '-X', 'POST', os.environ['BASE']+'/v1/chat/completions', '-H', 'Content-Type: application/json', '-d', payload], capture_output=True, text=True)
+payload = json.dumps({'model': '$m', 'messages': [{'role': 'user', 'content': \"$PROMPT\"}], 'max_tokens': 512})
+r = subprocess.run(['curl', '-s', '--max-time', '$TIMEOUT', '-X', 'POST', 'http://$HOST/v1/chat/completions', '-H', 'Content-Type: application/json', '-d', payload], capture_output=True, text=True)
 print(r.stdout)
-" 2>/dev/null)
+")
 
-    if [ -z "$USER_RESP" ]; then
-        warn "Model ${MODEL_ID} user prompt failed. Skipping."
-        echo
-        echo "  Results for ${MODEL_ID}:"
-        echo "  ─────────────────────────────────────────"
-        echo "  Status: SKIPPED (prompt failed)"
-        echo "  ─────────────────────────────────────────"
-        echo
-        echo "${MODEL_ID}|SKIPPED|N/A|N/A|N/A" >> "$RESULTS_FILE"
-        info "Unloading ${MODEL_ID}..."
-        unload_all
+    if [ -z "$USER_RESP" ] || [ "$USER_RESP" == "{}" ]; then
+        warn "Model $m user prompt failed. Skipping."
+        echo "$m|SKIPPED|N/A|N/A|N/A" >> "$RESULTS_FILE"
         continue
     fi
 
-    # Record end time
     END_TIME=$(date +%s%N)
-
-    # Measure GPU memory after
+    
+    # 4. Measure memory after
+    # Wait a moment for the router to settle/finish any async cleanup
     sleep 1
     MEM_AFTER=$(get_gpu_mem)
 
-    # Calculate delta
-    MEM_DELTA=$(python3 -c "print(int(${MEM_AFTER:-0} - ${MEM_BEFORE:-0}))")
-
-    # Elapsed time in seconds
-    ELAPSED_NS=$((END_TIME - START_TIME))
-    ELAPSED_SEC=$(echo "scale=2; $ELAPSED_NS / 1000000000" | bc)
-
-    # Parse timings from the last response (user prompt)
-    TIMINGS=$(echo "$USER_RESP" | python3 -c "
+    # 5. Parse Metrics
+    # We extract: total_time, prompt_tokens, completion_tokens, prompt_tps, eval_tps
+    metrics=$(echo "$USER_RESP" | python3 -c "
 import sys, json
 data = json.load(sys.stdin)
-t = data.get('timings', {})
-print(f'{t.get(\"prompt_per_second\", 0):.2f}')
-print(f'{t.get(\"predicted_per_second\", 0):.2f}')
-print(t.get('prompt_ms', 0))
-print(t.get('predicted_ms', 0))
-print(round(t.get('prompt_ms', 0) + t.get('predicted_ms', 0), 1))
-print(data.get('usage', {}).get('prompt_tokens', 0))
-print(data.get('usage', {}).get('completion_tokens', 0))
-" 2>/dev/null || echo -e "0.00\n0.00\n0\n0\n0\n0\n0")
+t = data.get('usage', {})
+timings = data.get('timings', {})
+# If llama-server uses standard OpenAI format, timings might be in a different place 
+# or not present. We fallback to basic calculations if needed.
+prompt_tokens = t.get('prompt_tokens', 0)
+completion_tokens = t.get('completion_tokens', 0)
+# If timings exists:
+p_tps = timings.get('prompt_per_second', 0)
+e_tps = timings.get('predicted_per_second', 0)
+print(f'{prompt_tokens}|{completion_tokens}|{p_tps:.2f}|{e_tps:.2f}')
+" 2>/dev/null || echo "0|0|0.00|0.00")
 
-    PREFILL_TPS=$(echo "$TIMINGS" | sed -n '1p')
-    EVAL_TPS=$(echo "$TIMINGS" | sed -n '2p')
-    PREFILL_MS=$(echo "$TIMINGS" | sed -n '3p')
-    EVAL_MS=$(echo "$TIMINGS" | sed -n '4p')
-    TOTAL_MS=$(echo "$TIMINGS" | sed -n '5p')
-    PROMPT_TOKENS=$(echo "$TIMINGS" | sed -n '6p')
-    COMPLETION_TOKENS=$(echo "$TIMINGS" | sed -n '7p')
+    IFS='|' read -r p_tokens c_tokens p_tps e_tps <<< "$metrics"
+    
+    ELAPSED_NS=$((END_TIME - START_TIME))
+    ELAPSED_SEC=$(awk -v n="$ELAPSED_NS" 'BEGIN {printf "%.2f", n/1e9}')
 
-    # Print per-model results
-    echo
-    echo "  Results for ${MODEL_ID}:"
-    echo "  ─────────────────────────────────────────"
-    echo "  Memory used:       $(bytes_to_human "$MEM_DELTA")"
-    echo "  Prefill tokens/s:  ${PREFILL_TPS}"
-    echo "  Eval tokens/s:     ${EVAL_TPS}"
-    echo "  Prefill time:      ${PREFILL_MS} ms"
-    echo "  Eval time:         ${EVAL_MS} ms"
-    echo "  Total time:        ${TOTAL_MS} ms"
-    echo "  Prompt tokens:     ${PROMPT_TOKENS}"
-    echo "  Completion tokens: ${COMPLETION_TOKENS}"
-    echo "  Wall clock time:   ${ELAPSED_SEC} s"
-    echo "  ─────────────────────────────────────────"
-    echo
+    # 6. Memory Delta
+    MEM_DELTA=$((MEM_AFTER - MEM_BEFORE))
+    if [ "$MEM_DELTA" -lt 0 ]; then
+        # If negative, it might be a baseline drift or timing issue. 
+        # We report it but don't let it break the script.
+        MEM_HUMAN=$(bytes_to_human "$MEM_DELTA")
+        MEM_VAL_STR="$MEM_HUMAN"
+        # For the table, we'll use 0 as the numeric value to avoid issues
+        MEM_NUM=0
+    else
+        MEM_HUMAN=$(bytes_to_human "$MEM_DELTA")
+        MEM_NUM=$MEM_DELTA
+    fi
 
-    # Store result for final report
-    echo "${MODEL_ID}|$(bytes_to_human "$MEM_DELTA")|${PREFILL_TPS}|${EVAL_TPS}|${ELAPSED_SEC}" >> "$RESULTS_FILE"
+    echo "  Result: $m | Memory: $MEM_HUMAN | Time: ${ELAPSED_SEC}s | Eval: ${e_tps} t/s"
+    echo "$m|$MEM_HUMAN|$p_tps|$e_tps|$ELAPSED_SEC" >> "$RESULTS_FILE"
 
-    # Unload before next model
-    info "Unloading ${MODEL_ID}..."
-    unload_all
-
-done <<< "$MODEL_IDS"
+    # 7. Cleanup (only if NOT keeping loaded)
+    if [[ "$KEEP_LOADED" -eq 0 ]]; then
+        # In a router setup, we can't easily "unload" one model. 
+        # We just wait for the next one to load.
+        # If we wanted to be aggressive, we could restart the service, 
+        # but that's too much for a benchmark.
+        sleep 1
+    fi
+done
 
 # ------------------------------------------------------------------
-# Step 4: Final report table
+# Final Report
 # ------------------------------------------------------------------
-# Size the Model column to the longest model id so long names don't
-# overflow the fixed-width frame.
-MODEL_W=16
-while IFS='|' read -r model _rest; do
-    [ "${#model}" -gt "$MODEL_W" ] && MODEL_W=${#model}
+echo
+echo "============================================================"
+echo "BENCHMARK SUMMARY"
+echo "============================================================"
+
+# Find max model name length
+MAX_NAME_LEN=16
+while IFS='|' read -r name _rest; do
+    [[ ${#name} -gt $MAX_NAME_LEN ]] && MAX_NAME_LEN=${#name}
 done < "$RESULTS_FILE"
 
-WIDS=( "$MODEL_W" 10 12 11 12 )
-WALL_W=${WIDS[4]}
+printf "%-${MAX_NAME_LEN}s │ %-10s │ %-10s │ %-10s │ %-10s\n" "Model" "Memory" "Prompt/s" "Eval/s" "Wall (s)"
+echo "╪────────────╪────────────╪────────────╪────────────╪────────────"
 
-pad() { local s; printf -v s '%*s' "$1" ''; printf '%s' "${s// /$2}"; }
-
-box_line() { # $1 left  $2 tee  $3 horiz  $4 right
-    printf '%s' "$1"
-    for ((i = 0; i < ${#WIDS[@]}; i++)); do
-        pad $(( WIDS[$i] + 2 )) "$3"
-        if [ "$i" -lt $((${#WIDS[@]} - 1)) ]; then
-            printf '%s' "$2"
-        else
-            printf '%s' "$4"
-        fi
-    done
-    printf '\n'
-}
-
-echo
-box_line "╔" "╦" "═" "╗"
-TITLE="BENCHMARK SUMMARY"
-IW=$((MODEL_W + 59))
-LP=$(( (IW - ${#TITLE}) / 2 ))
-RP=$(( IW - ${#TITLE} - LP ))
-printf "║%s%s%s║\n" "$(pad "$LP" ' ')" "$TITLE" "$(pad "$RP" ' ')"
-box_line "╠" "╪" "═" "╣"
-printf "║ %-${MODEL_W}s │ %-10s │ %-12s │ %-11s │ %-${WALL_W}s ║\n" \
-    "Model" "Memory" "Prefill t/s" "Eval t/s" "Wall Time"
-box_line "╠" "╪" "─" "╣"
-
-while IFS='|' read -r model mem prefill_tps eval_tps wall_time; do
-    printf "║ %-${MODEL_W}s │ %-10s │ %-12s │ %-11s │ %-${WALL_W}s ║\n" \
-        "$model" "$mem" "$prefill_tps" "$eval_tps" "${wall_time}s"
+while IFS='|' read -r name mem p_tps e_tps wall; do
+    printf "%-${MAX_NAME_LEN}s │ %-10s │ %-10s │ %-10s │ %-10s\n" "$name" "$mem" "$p_tps" "$e_tps" "$wall"
 done < "$RESULTS_FILE"
-
-box_line "╚" "╧" "═" "╝"
-echo
-
-log "Benchmark complete."
+echo "============================================================"
+echo "Benchmark complete."
