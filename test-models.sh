@@ -407,15 +407,14 @@ with open(sys.argv[1]) as f:
     d = json.load(f)
 ec = d.get('eval_count', 0)
 pc = d.get('prompt_eval_count', 0)
-total_ns = d.get('total_duration', 0)
 load_ns = d.get('load_duration', 0)
 pev_ns = d.get('prompt_eval_duration', 0)
 ev_ns = d.get('eval_duration', 0)
-total = total_ns / 1e9 if total_ns else 0
 load = load_ns / 1e9 if load_ns else 0
+inference = (pev_ns + ev_ns) / 1e9
 ptps = pc / (pev_ns / 1e9) if pev_ns and pev_ns > 0 else 0
 etps = ec / (ev_ns / 1e9) if ev_ns and ev_ns > 0 else 0
-print(f'{total:.2f}|{load:.2f}|{pc}|{ptps:.2f}|{ec}|{etps:.2f}')
+print(f'{load:.2f}|{inference:.2f}|{pc}|{ptps:.2f}|{ec}|{etps:.2f}')
 " "$logfile" 2>/dev/null || echo "-|-|0|-|0|-"
       ;;
     llama)
@@ -1013,7 +1012,7 @@ pass=0; fail=0; skip=0; failed=()
 total_sum=0.00; erate_sum=0.00; erate_n=0
 SUM_M=(); SUM_S=(); SUM_R=(); SUM_SZ=()
 # Per-model metrics for llama.cpp (ollama uses SUM_R)
-LLAMA_PC=(); LLAMA_EC=(); LLAMA_ER=(); LLAMA_TOTAL=(); LLAMA_PR=()
+LLAMA_PC=(); LLAMA_EC=(); LLAMA_ER=(); LLAMA_TOTAL=(); LLAMA_PR=(); LLAMA_LOAD=()
 
 for m in "${MODELS[@]}"; do
   echo
@@ -1080,11 +1079,14 @@ except Exception:
     print('0|0|0.00|0.00|0.00')
 " "$runlog" 2>/dev/null || echo "0|0|0.00|0.00|0.00")
     IFS='|' read -r m_pc m_ec m_pr m_er m_total <<< "$llama_metrics"
+    # LOAD(s) = total elapsed - inference time (model is loaded fresh each run)
+    m_load=$(awk -v e="$elapsed" -v t="$m_total" 'BEGIN { printf "%.2f", e - t }')
     LLAMA_PC+=("$m_pc")
     LLAMA_EC+=("$m_ec")
     LLAMA_ER+=("$m_er")
     LLAMA_TOTAL+=("$m_total")
     LLAMA_PR+=("$m_pr")
+    LLAMA_LOAD+=("$m_load")
     SUM_SZ+=("$MEM_HUMAN")
     echo "--- $m: $status (${elapsed}s)${reason:+ - $reason} [mem: $MEM_HUMAN]"
   fi
@@ -1109,14 +1111,13 @@ printf "%-${_mlen}s %-6s %10s %9s %9s %7s %8s %7s %8s\n" \
 table_sep $_mlen 6 10 9 9 7 8 7 8
 for i in "${!SUM_M[@]}"; do
   if [[ "$BACKEND" == "ollama" ]]; then
-    IFS='|' read -r m_total m_load m_pc m_pr m_ec m_er <<< "${SUM_R[$i]}"
-    # TIME(s) = inference only (total - load)
-    m_inference=$(python3 -c "print(f'{max(0, float(${m_total}) - float(${m_load})):.2f}')")
+    # parse_metrics output: load|inference|pc|ptps|ec|etps
+    IFS='|' read -r m_load m_inference m_pc m_pr m_ec m_er <<< "${SUM_R[$i]}"
     printf "%-${_mlen}s %-6s %10s %9s %9s %7s %8s %7s %8s\n" \
       "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "$m_load" "$m_inference" "$m_pc" "$m_pr" "$m_ec" "$m_er"
   else
     printf "%-${_mlen}s %-6s %10s %9s %9s %7s %8s %7s %8s\n" \
-      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "0.00" "${LLAMA_TOTAL[$i]:--}" "${LLAMA_PC[$i]:-0}" "${LLAMA_PR[$i]:-0.00}" "${LLAMA_EC[$i]:-0}" "${LLAMA_ER[$i]:-0.00}"
+      "${SUM_M[$i]:0:$_mlen}" "${SUM_S[$i]}" "${SUM_SZ[$i]}" "${LLAMA_LOAD[$i]:--}" "${LLAMA_TOTAL[$i]:--}" "${LLAMA_PC[$i]:-0}" "${LLAMA_PR[$i]:-0.00}" "${LLAMA_EC[$i]:-0}" "${LLAMA_ER[$i]:-0.00}"
   fi
 done
 echo "------------------------------------------------------------------------------"
