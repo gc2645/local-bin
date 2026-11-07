@@ -21,14 +21,15 @@ fi
 readonly FILTER="${1,,}"
 readonly COMMAND="$2"
 
-case "$FILTER" in
-    all|node|pve|vm|lxc|linux|windows|gpu) ;;
-    *)
-        printf 'Error: unknown filter: %s\n' "$FILTER" >&2
-        usage
-        exit 2
-        ;;
-esac
+# Validate: either a known filter or something found in nodes.csv
+readonly KNOWN_FILTERS="all node pve vm lxc linux windows gpu"
+if echo "$KNOWN_FILTERS" | grep -qw "$FILTER"; then
+    : # known filter, proceed
+elif ! grep -qi "$FILTER" "$NODES_FILE" 2>/dev/null; then
+    printf 'Error: unknown filter: %s\n' "$FILTER" >&2
+    usage
+    exit 2
+fi
 
 if [[ -z "$COMMAND" ]]; then
     printf 'Error: command must not be empty.\n' >&2
@@ -46,18 +47,31 @@ if ! command -v ssh >/dev/null 2>&1; then
 fi
 
 NODES=()
-while IFS=, read -r NAME TYPE PLATFORM ID OS GPU; do
-    [[ "${NAME,,}" == "name" || -z "$NAME" ]] && continue
+while IFS= read -r LINE; do
+    [[ "${LINE,,}" == "name,"* || -z "$LINE" ]] && continue
+
+    IFS=, read -r NAME TYPE PLATFORM ID OS GPU ROLES <<< "$LINE"
+    NAME="${NAME// /}"
+    TYPE="${TYPE// /}"
+    PLATFORM="${PLATFORM// /}"
+    ID="${ID// /}"
+    OS="${OS// /}"
+    GPU="${GPU// /}"
+    ROLES="${ROLES// /}"
 
     case "$FILTER" in
         all)     MATCH=true ;;
         node)    [[ "$NAME" == node* ]] && MATCH=true || MATCH=false ;;
-        pve)     [[ "${TYPE,,}" == pve ]] && MATCH=true || MATCH=false ;;
+        pve)     [[ "${PLATFORM,,}" == pve ]] && MATCH=true || MATCH=false ;;
         vm)      [[ "${TYPE,,}" == vm ]] && MATCH=true || MATCH=false ;;
         lxc)     [[ "${TYPE,,}" == lxc ]] && MATCH=true || MATCH=false ;;
         linux)   [[ "${OS,,}" == linux ]] && MATCH=true || MATCH=false ;;
         windows) [[ "${OS,,}" == windows ]] && MATCH=true || MATCH=false ;;
         gpu)     [[ "${GPU,,}" == gpu ]] && MATCH=true || MATCH=false ;;
+        *)       # arbitrary value found in CSV — grep the full line
+                 MATCH=false
+                 echo "$LINE" | grep -qi "$FILTER" && MATCH=true
+                 ;;
     esac
 
     [[ "$MATCH" == true ]] && NODES+=("$NAME")
