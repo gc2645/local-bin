@@ -31,17 +31,41 @@ if [[ ${#HOSTS[@]} -eq 0 && -f "$NODES_CSV" ]]; then
         [[ "$platform" == "vastai" ]] && HOSTS+=("$name")
     done < <(tail -n +2 "$NODES_CSV")
 fi
+
+# Build host→machine_id mapping from nodes.csv
+declare -A MACHINE_ID
+if [[ -f "$NODES_CSV" ]]; then
+    while IFS=',' read -r name type platform id rest; do
+        [[ "$platform" == "vastai" ]] && MACHINE_ID["$name"]="$id"
+    done < <(tail -n +2 "$NODES_CSV")
+fi
 if [[ ${#HOSTS[@]} -eq 0 ]]; then
     HOSTS=(node11 node12 node13 node14 node15 node16v1 node16v2 node17 node18 node19)
 fi
 
 # --- Run embedded Python (reads enriched snapshots, renders table) ---
-exec python3 - "${HOSTS[@]}" "${SAVE_MODE}" "${JSON_MODE}" <<'PYTHON_SCRIPT'
+# Encode host→machine mapping as tab-separated pairs
+MACHINE_MAP=""
+for h in "${HOSTS[@]}"; do
+    MACHINE_MAP+="${h}"$'\t'"${MACHINE_ID[$h]:-}"$'\n'
+done
+MACHINE_MAP="${MACHINE_MAP%$'\n'}"
+
+exec python3 - "${HOSTS[@]}" "${MACHINE_MAP}" "${SAVE_MODE}" "${JSON_MODE}" <<'PYTHON_SCRIPT'
 import subprocess, sys, json, datetime, os, re
 
-HOSTS = sys.argv[1:-2] if len(sys.argv) > 3 else []
+HOSTS = sys.argv[1:-3] if len(sys.argv) > 4 else []
+MACHINE_MAP_RAW = sys.argv[-3] if len(sys.argv) > 3 else ""
 SAVE_MODE = sys.argv[-2] == "1" if len(sys.argv) > 2 else False
 JSON_MODE = sys.argv[-1] == "1" if len(sys.argv) > 2 else False
+
+# Build host → machine_id mapping
+MACHINE_MAP = {}
+for line in MACHINE_MAP_RAW.split("\n"):
+    if "\t" in line:
+        h, mid = line.split("\t", 1)
+        if mid:
+            MACHINE_MAP[h] = mid
 
 SAVE_LOG = os.environ.get("GPU_WORKLOADS_LOG", os.path.expanduser("~/src/local-bin/data/gpu-workloads.jsonl"))
 
@@ -234,17 +258,19 @@ if JSON_MODE:
     sys.exit(0)
 
 # --- Table output ---
-hdr = f"{'HOST':<8s} {'CONTAINER':<15s} {'UPTIME':>6s}  {'GPU_NAME':<15s} {'FAN':<6s} {'TEMP':<8s} {'MEM':<5s} {'UTIL':<4s} {'POWER':<8s} {'WORKLOAD':<25s}"
+hdr = f"{'NAME':<10s} {'MACHINE':<10s} {'GPU':<15s} {'CONTAINER':<15s} {'UPTIME':>6s}  {'FAN':<5s} {'TEMP':<6s} {'MEM':<5s} {'UTIL':<4s} {'POWER':<9s} {'WORKLOAD':<25s}"
 print(hdr)
 print("-" * len(hdr))
 
 for r in results:
     if "error" in r:
         host = r["host"]
-        print(f"{host:<8s} {'-':<15s} {'-':>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<8s} {'snapshot unavailable':<25s}")
+        mid = MACHINE_MAP.get(host, "")
+        print(f"{host:<10s} {mid:<10s} {'-':<15s} {'-':<15s} {'-':>6s}  {'-':<5s} {'-':<6s} {'-':<5s} {'-':<4s} {'-':<9s} {'snapshot unavailable':<25s}")
         continue
 
     host = r.get("host", "?")
+    mid = MACHINE_MAP.get(host, "")
     uptime_s = r.get("uptime_s", 0)
     host_uptime_str = parse_uptime(uptime_s)
     gpus = r.get("gpu", [])
@@ -260,10 +286,10 @@ for r in results:
         else:
             idle_str = host_uptime_str
         if gpu_data is None:
-            print(f"{host:<8s} {'-':<15s} {idle_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<8s} {'no renter container; host/VM workload unclassified':<25s}")
+            print(f"{host:<10s} {mid:<10s} {'-':<15s} {'-':<15s} {idle_str:>6s}  {'-':<5s} {'-':<6s} {'-':<5s} {'-':<4s} {'-':<9s} {'no renter container; host/VM workload unclassified':<25s}")
         else:
             gpu_name, mem_pct, fan, temp, util, power, _ = gpu_data
-            print(f"{host:<8s} {'-':<15s} {idle_str:>6s}  {gpu_name:<15s} {fan:<6s}{temp:<8s}{mem_pct:<5s}{util:<4s} {power:<8s} {'no renter container; host/VM workload unclassified':<25s}")
+            print(f"{host:<10s} {mid:<10s} {gpu_name:<15s} {'-':<15s} {idle_str:>6s}  {fan:<5s}{temp:<6s}{mem_pct:<5s}{util:<4s} {power:<9s} {'no renter container; host/VM workload unclassified':<25s}")
         continue
 
     for c in containers:
@@ -279,10 +305,10 @@ for r in results:
         # Preserve the original table's host GPU metrics for every renter row.
         cards = gpus
         if not cards:
-            print(f"{host:<8s} {name:<15s} {up_str:>6s}  {'-':<15s} {'-':<6s} {'-':<8s} {'-':<5s} {'-':<4s} {'-':<8s} {label:<25s}")
+            print(f"{host:<10s} {mid:<10s} {'-':<15s} {name:<15s} {up_str:>6s}  {'-':<5s} {'-':<6s} {'-':<5s} {'-':<4s} {'-':<9s} {label:<25s}")
             continue
         for card in cards:
             g, _ = build_gpu_str([card], fan_speed)
-            print(f"{host:<8s} {name:<15s} {up_str:>6s}  {g[0]:<15s} {g[2]:<6s}{g[3]:<8s}{g[1]:<5s}{g[4]:<4s} {g[5]:<8s} {label:<25s}")
+            print(f"{host:<10s} {mid:<10s} {g[0]:<15s} {name:<15s} {up_str:>6s}  {g[2]:<5s}{g[3]:<6s}{g[1]:<5s}{g[4]:<4s} {g[5]:<9s} {label:<25s}")
 
 PYTHON_SCRIPT
