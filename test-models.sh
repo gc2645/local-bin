@@ -2,13 +2,14 @@
 # test-models - smoke-test models on ollama or llama.cpp
 #
 # examples:
-#   test-models.sh -b llama                     # test llama.cpp models
-#   test-models.sh -b ollama -H 11435           # test ollama on :11435
-#   test-models.sh -b llama -m 'qwen'           # only matching models
-#   test-models.sh -b ollama -p "say hi" -n     # dry run
-#   test-models.sh -b llama -k                  # leave models loaded
-#   test-models.sh -b ollama --test-tools        # tool-calling tests
-#   test-models.sh -b llama --logic-test         # logic reasoning tests
+#   test-models.sh llama                     # test llama.cpp models
+#   test-models.sh ollama -H 11435           # test ollama on :11435
+#   test-models.sh llama -m 'qwen'           # only matching models
+#   test-models.sh ollama -p "say hi" -n     # dry run
+#   test-models.sh llama -k                  # leave models loaded
+#   test-models.sh ollama --test-tools        # tool-calling tests
+#   test-models.sh llama --logic-test         # logic reasoning tests
+#   test-models.sh ollama "hello"             # custom prompt as positional
 #
 set -euo pipefail
 
@@ -45,12 +46,12 @@ error() { echo -e "${RED}[error]${NC} $*" >&2; }
 
 usage() {
   cat <<'EOF'
-usage: test-models.sh -b ollama|llama [options] [prompt]
+usage: test-models.sh ollama|llama [options] [prompt]
 
 targets one server and runs the same smoke test against every model.
 
 required:
-  -b, --backend ollama|llama   which backend to test (required)
+  ollama|llama           which backend to test (positional, required)
 
 options:
   -H, --host HOST          server to test: port, host:port, or URL
@@ -86,7 +87,6 @@ die() { error "$*"; exit 1; }
 
 while (( $# )); do
   case "$1" in
-    -b|--backend)    [[ $# -ge 2 ]] || die "$1 needs a value"; BACKEND="$2"; shift 2 ;;
     -H|--host)       [[ $# -ge 2 ]] || die "$1 needs a value"; HOST="$2"; shift 2 ;;
     -p|--prompt)     [[ $# -ge 2 ]] || die "$1 needs a value"; PROMPT="$2"; shift 2 ;;
     -f|--prompt-file) [[ $# -ge 2 ]] || die "$1 needs a value"; PROMPT_FILE="$2"; shift 2 ;;
@@ -102,12 +102,20 @@ while (( $# )); do
     --logic-test)    LOGIC_TEST=1; shift ;;
     --)              shift; break ;;
     -*)              die "unknown option: $1 (try --help)" ;;
-    *)               PROMPT="$1"; shift ;;
+    *)
+      # Positional: first is backend, second is prompt
+      if [[ -z "$BACKEND" ]]; then
+        BACKEND="$1"
+      else
+        PROMPT="$1"
+      fi
+      shift
+      ;;
   esac
 done
 
 # Validate backend
-[[ -z "$BACKEND" ]] && die "missing -b ollama|llama (try --help)"
+[[ -z "$BACKEND" ]] && die "missing backend (ollama|llama) as first argument (try --help)"
 case "$BACKEND" in
   ollama|llama) ;;
   *) die "unknown backend: $BACKEND (must be ollama or llama)" ;;
